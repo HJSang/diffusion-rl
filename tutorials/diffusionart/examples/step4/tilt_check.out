@@ -1,0 +1,5 @@
+h=1e-01  finite diff = [5.63559 5.65795]  Cov(R,x0) = [6.25947 6.28443]  max rel err = 9.97e-02
+h=1e-02  finite diff = [6.25236 6.27729]  Cov(R,x0) = [6.25947 6.28443]  max rel err = 1.14e-03
+h=1e-03  finite diff = [6.2594  6.28436]  Cov(R,x0) = [6.25947 6.28443]  max rel err = 1.14e-05
+h=1e-04  finite diff = [6.25947 6.28443]  Cov(R,x0) = [6.25947 6.28443]  max rel err = 1.14e-07
+1D Gaussian: Cov(R,x) = 1.6898  closed form s^2 = 1.6900000000000002  FD = 1.6898

@@ -1,0 +1,607 @@
+<section class="step" id="step-1" data-title="Flow matching and sampling">
+<header class="step-head">
+  <p class="eyebrow">Step 1 · about 1 day</p>
+  <h2>The generation side: flow matching, ODE/SDE sampling and CFG</h2>
+  <p class="lede">After this step you can read every symbol in the paper's §2 Preliminaries: you will know what a velocity field is, why the regression target $u_t=x_0-\epsilon$ trains the ideal velocity $\mathbb E[u_t\mid x_t]$, how ODE and SDE samplers turn that field into images, why only the SDE gives you a log-prob, and what classifier-free guidance does. You will also know which sign convention each piece of code uses.</p>
+</header>
+
+<h3 id="s1-why">1. Why generation needs a path from noise to data</h3>
+
+<p>An LLM generates by factorizing the joint distribution over tokens with the chain rule, $p(y\mid c)=\prod_k p(y_k\mid y_{&lt;k},c)$, and sampling one token at a time. Each factor is a categorical distribution over a finite vocabulary, so the network outputs logits, sampling is a softmax draw, and the log-probability of a whole response is a sum of per-token log-probs. Everything in PPO and GRPO (ratios, KL, clipping) is built on that sum.</p>
+
+<p>An image does not have a natural left-to-right order, and a pixel or latent value is continuous. A $512\times512$ RGB image is a point in roughly $786{,}000$ dimensions; SD3.5's latent for the same image is a $16\times64\times64$ tensor, still $65{,}536$ continuous numbers. You cannot write down a normalized density over that space with a softmax. What you can do is start from a distribution you can sample trivially, a standard Gaussian $\epsilon\sim\mathcal N(0,I)$, and learn a <em>transport</em>: a rule that moves Gaussian samples, a little at a time, until their distribution matches the data distribution. The sequence of intermediate distributions is the <strong>path</strong>, and the rule that moves a sample along it is a vector field.</p>
+
+<p>Breaking the transport into many small moves is what makes it learnable. A single network that maps noise to an image in one shot would have to solve a hard, highly multimodal regression. A network that only has to answer "at this partially noisy point, which way is the data?" solves a much easier, local problem, and we can supervise it with simple regression on pairs (clean sample, noise) that we generate ourselves.</p>
+
+<h4>Diffusion and flow matching in one page</h4>
+
+<p>Two families of models implement this idea. They differ mainly in what the network predicts.</p>
+
+<ul>
+  <li><strong>Diffusion models</strong> (DDPM, score-based models) define a forward process that gradually adds Gaussian noise, $x_t=\alpha_t x_0+\sigma_t\epsilon$, with a variance-preserving schedule. The network predicts the noise $\epsilon$ (equivalently the <em>score</em> $\nabla_x\log p_t(x)$, the gradient of the log-density of the noisy marginal). Sampling inverts the noising by a stochastic or deterministic reverse process that uses the score.</li>
+  <li><strong>Flow matching</strong> (Lipman et al., 2022) and <strong>rectified flow</strong> (Liu et al., 2022) choose the straight interpolation $\alpha_t=1-t$, $\sigma_t=t$ and train the network to predict a <em>velocity</em>, the time derivative of the path. Sampling integrates an ordinary differential equation (ODE) along that velocity.</li>
+</ul>
+
+<p>At a fixed noisy point $x_t$ and time $t$, the four quantities $\mathbb E[x_0\mid x_t]$, $\mathbb E[\epsilon\mid x_t]$, the score, and the velocity are affine functions of each other (you will derive the conversions in §2). So the families are not different models of the world; they are different parameterizations of the same object, with different numerical behavior. SD3/SD3.5, FLUX, HunyuanVideo and Wan, the models in the paper, are all trained as rectified flows that predict velocity. The paper, like most of the field, still says "diffusion" and "diffusion RL" as an umbrella term; whenever it writes equations, it means the rectified-flow parameterization defined next (the paper, §2).</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>Think of the velocity network as the policy and of one sampling step as one action. The analogy to decoding is real but imperfect: <strong>sampling steps are like decode steps, but every step rewrites the whole sample</strong>. A token, once emitted, is fixed; a diffusion step updates all 65,536 latent coordinates at once, and the "response" is only the final state $x_0$. Typical step counts are small (10 for SD3.5-M rollouts in the paper, 4 to 16 for video), so trajectories are short but each action is enormous.</p></div>
+
+<h3 id="s1-rf">2. Rectified flow and conditional flow matching</h3>
+
+<h4>The interpolation and the per-sample target</h4>
+
+<p>Use the paper's notation (§2). Draw a clean sample (an <strong>endpoint</strong>) $x_0\sim p_{\text{data}}$ and independent noise $\epsilon\sim\mathcal N(0,I)$. For $t\in[0,1]$ define the forward (noising) state</p>
+
+<div class="math-block">\[ x_t=\alpha_t x_0+\sigma_t\epsilon,\qquad \alpha_t=1-t,\ \ \sigma_t=t,\qquad\text{so}\quad x_t=(1-t)\,x_0+t\,\epsilon. \]</div>
+
+<p>At $t=0$ the state is the clean sample; at $t=1$ it is pure noise. For a fixed pair $(x_0,\epsilon)$ the path $t\mapsto x_t$ is a straight line segment. Generation will run $t$ from $1$ down to $0$, so the paper defines the velocity in the <strong>denoising</strong> direction, which is minus the time derivative:</p>
+
+<div class="math-block">\[ u_t=-\dot\alpha_t\,x_0-\dot\sigma_t\,\epsilon=-(-1)\,x_0-(1)\,\epsilon=x_0-\epsilon . \]</div>
+
+<p>$u_t$ is the <strong>per-sample (conditional) velocity target</strong>. For rectified flow it does not depend on $t$: every point on the segment has the same velocity, pointing from the noise end toward the data end. If you stand at $x_t$ and take a step of size $\Delta$ toward smaller $t$, you land exactly on $x_{t-\Delta}=x_t+\Delta\,u_t$.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 720 320" role="img" aria-label="Noise-to-data path. Left: Gaussian noise at t equals 1. Right: data clusters at t equals 0. Curved trajectories of the marginal velocity field connect them; a straight dashed segment shows one conditional path x_t equals (1 minus t) x_0 plus t epsilon. The velocity arrow points toward the data, in the direction of decreasing t.">
+  <defs>
+    <marker id="s1-arr-fg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--fg)"/></marker>
+    <marker id="s1-arr-acc2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent-2)"/></marker>
+    <marker id="s1-arr-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/></marker>
+  </defs>
+  <!-- forward noising arrow (top) -->
+  <line x1="560" y1="34" x2="160" y2="34" style="stroke:var(--muted);stroke-width:1.5;stroke-dasharray:5 4" marker-end="url(#s1-arr-muted)"/>
+  <text x="360" y="24" text-anchor="middle" style="fill:var(--muted);font-size:13px">forward noising (training only): xₜ = (1−t)·x₀ + t·ε</text>
+  <!-- noise cloud -->
+  <circle cx="120" cy="165" r="70" style="fill:var(--surface);stroke:var(--line);stroke-width:1.5"/>
+  <g style="fill:var(--muted)">
+    <circle cx="95" cy="140" r="3"/><circle cx="130" cy="120" r="3"/><circle cx="150" cy="170" r="3"/><circle cx="105" cy="195" r="3"/>
+    <circle cx="80" cy="170" r="3"/><circle cx="140" cy="205" r="3"/><circle cx="120" cy="160" r="3"/><circle cx="160" cy="135" r="3"/>
+  </g>
+  <text x="120" y="262" text-anchor="middle" style="fill:var(--fg);font-size:14px;font-weight:600">t = 1 · noise</text>
+  <text x="120" y="280" text-anchor="middle" style="fill:var(--muted);font-size:12px">ε ~ N(0, I)</text>
+  <!-- data clusters -->
+  <circle cx="600" cy="110" r="30" style="fill:var(--surface);stroke:var(--line);stroke-width:1.5"/>
+  <circle cx="610" cy="225" r="38" style="fill:var(--surface);stroke:var(--line);stroke-width:1.5"/>
+  <g style="fill:var(--accent-2)">
+    <circle cx="592" cy="104" r="3"/><circle cx="608" cy="116" r="3"/><circle cx="600" cy="98" r="3"/>
+    <circle cx="598" cy="220" r="3"/><circle cx="620" cy="232" r="3"/><circle cx="612" cy="212" r="3"/><circle cx="604" cy="240" r="3"/>
+  </g>
+  <text x="605" y="285" text-anchor="middle" style="fill:var(--fg);font-size:14px;font-weight:600">t = 0 · data</text>
+  <text x="605" y="303" text-anchor="middle" style="fill:var(--muted);font-size:12px">endpoints x₀ ~ p(x₀ | c)</text>
+  <!-- marginal (curved) trajectories -->
+  <g style="fill:none;stroke:var(--accent);stroke-width:1.8;opacity:0.8">
+    <path d="M95,140 C250,110 420,90 592,104"/>
+    <path d="M130,120 C260,95 430,105 608,116"/>
+    <path d="M150,170 C300,170 450,215 598,220"/>
+    <path d="M105,195 C260,215 440,240 620,232"/>
+    <path d="M140,205 C300,240 470,250 604,240"/>
+  </g>
+  <!-- one straight conditional segment -->
+  <line x1="120" y1="160" x2="612" y2="212" style="stroke:var(--fg);stroke-width:1.2;stroke-dasharray:3 4"/>
+  <text x="360" y="58" text-anchor="middle" style="fill:var(--fg);font-size:12px">dashed: one conditional path (straight), velocity uₜ = x₀ − ε</text>
+  <!-- velocity arrow at a state -->
+  <circle cx="370" cy="186" r="5" style="fill:var(--accent-2)"/>
+  <line x1="370" y1="186" x2="452" y2="194" style="stroke:var(--accent-2);stroke-width:2.5" marker-end="url(#s1-arr-acc2)"/>
+  <text x="300" y="160" style="fill:var(--accent-2);font-size:13px;font-weight:600">v(xₜ, t): points toward data</text>
+  <text x="300" y="176" style="fill:var(--muted);font-size:12px">Euler step: x(t−Δ) = x(t) + Δ·v</text>
+  <!-- time axis -->
+  <line x1="120" y1="312" x2="605" y2="312" style="stroke:var(--fg);stroke-width:1.2" marker-end="url(#s1-arr-fg)"/>
+  <text x="362" y="304" text-anchor="middle" style="fill:var(--fg);font-size:12px">generation: t decreases 1 → 0</text>
+</svg>
+<figcaption>Generation moves left to right, from noise at $t=1$ to data at $t=0$. Each training pair $(x_0,\epsilon)$ defines a straight conditional path (dashed) whose velocity is $u_t=x_0-\epsilon$. The learned field averages these targets, so the trajectories it actually produces (teal) are curved. The velocity arrow points toward the data, the direction of decreasing $t$.</figcaption>
+</figure>
+
+<h4>From per-sample targets to the ideal velocity field</h4>
+
+<p>At sampling time you do not know $x_0$ or $\epsilon$; you only see the current state $x_t$. Many different pairs $(x_0,\epsilon)$ pass through the same $x_t$, and they disagree about the direction. The best single answer, in squared error, is their average. Define the <strong>marginal</strong> or <strong>ideal velocity field</strong></p>
+
+<div class="math-block">\[ v^*(x,t)=\mathbb E\big[u_t\mid x_t=x\big]=\mathbb E\big[x_0-\epsilon\mid x_t=x\big], \]</div>
+
+<p>where the expectation is over the joint distribution of $(x_0,\epsilon)$ conditioned on landing at $x$ at time $t$. Flow matching trains a network $v_\theta(x_t,t,c)$ by regressing the per-sample target:</p>
+
+<div class="math-block">\[ \mathcal L_{\text{FM}}(\theta)=\mathbb E_{t\sim\mathcal U[0,1],\,x_0\sim p_{\text{data}},\,\epsilon\sim\mathcal N(0,I)}\Big[\big\lVert v_\theta(x_t,t,c)-(x_0-\epsilon)\big\rVert_2^2\Big]. \]</div>
+
+<p><strong>Why the minimizer is the conditional expectation.</strong> Fix $t$ and write $v=v_\theta(x_t,t)$, $v^*=v^*(x_t,t)$. Add and subtract $v^*$:</p>
+
+<div class="math-block">\[ \mathbb E\lVert v-u_t\rVert^2=\mathbb E\lVert v-v^*\rVert^2+2\,\mathbb E\big[\langle v-v^*,\,v^*-u_t\rangle\big]+\mathbb E\lVert v^*-u_t\rVert^2 . \]</div>
+
+<p>The middle term vanishes by the tower property: condition on $x_t$; then $v-v^*$ is a fixed vector and $\mathbb E[v^*-u_t\mid x_t]=v^*-v^*=0$. So</p>
+
+<div class="math-block">\[ \mathcal L_{\text{FM}}(\theta)=\underbrace{\mathbb E\lVert v_\theta(x_t,t)-v^*(x_t,t)\rVert^2}_{\text{what training reduces}}+\underbrace{\mathbb E\,\operatorname{tr}\operatorname{Cov}\!\big[u_t\mid x_t\big]}_{\text{irreducible, independent of }\theta}. \]</div>
+
+<p>Minimizing the loss over all functions gives $v_\theta=v^*$ almost everywhere. This is the central trick of flow matching: we never compute $v^*$, we only regress noisy per-sample targets, and the expectation does the averaging for us. It is exactly the same argument that makes a cross-entropy-trained LM output $p(y_k\mid y_{&lt;k})$ even though each training example shows only one next token.</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>The loss does not go to zero. The second term is the analogue of the entropy floor of next-token cross-entropy: it measures how uncertain the direction is, not how bad the model is. In the toy below the ideal field itself has loss 3.892 and the trained network reaches 3.897. A flow-matching loss curve therefore tells you little about sample quality, just as LM pretraining loss tells you little about RL reward.</p></div>
+
+<h4>The ideal velocity is induced by an endpoint distribution</h4>
+
+<p>Look at what $v^*$ depends on: the distribution of endpoints $x_0$ (and the fixed noise distribution). Change the endpoint distribution and you change the ideal field. The paper makes this explicit in §3.1. For an endpoint distribution $P_b=p_b(x_0\mid c)$ it forms the joint forward distribution $Q_b$ of $(x_0,\epsilon,x_t,u_t)$ by drawing $x_0\sim P_b$, $\epsilon\sim\mathcal N(0,I)$ and noising, and defines, with $s_t=(x_t,t,c)$,</p>
+
+<div class="math-block">\[ v^b_{\text{fwd}}(s_t):=\mathbb E_{Q_b}\big[u_t\mid s_t\big]. \]</div>
+
+<p>This is our $v^*$ with the data distribution replaced by $P_b$. The paper calls it the <strong>ideal forward velocity induced by $P_b$</strong>. Three facts from this step will carry the analysis in Steps 3 and 4:</p>
+
+<ol>
+  <li>Reweighting the endpoints (for example by a reward, $p_+\propto r\,p_{\text{old}}$) changes $v_{\text{fwd}}$ in a computable way. In the Gaussian-mixture example below, reweighting simply changes the mixture weights in the closed form.</li>
+  <li>The field a sampler actually uses, $v_{\text{rvs}}^{\text{old}}:=v_{\text{old}}$ (a trained network), is <em>not</em> guaranteed to equal the ideal forward field of the endpoints it produces. The network is imperfect and the sampler discretizes. The paper names this gap $e=v^{\text{old}}_{\text{fwd}}-v^{\text{old}}_{\text{rvs}}$ and shows that it leaks into forward-process RL objectives (the paper, §3.1, the proposition on the forward–reverse consistency force).</li>
+  <li>Under rectified flow $u_t=x_0-\epsilon$ with $\epsilon$ independent of $x_0$, so any covariance between a reward and $u_t$ equals the covariance between the reward and $x_0$ at every noise level. DiffusionART's guidance direction is built on this (the paper, §4.1).</li>
+</ol>
+
+<h4>Useful conversions</h4>
+
+<p>Because $x_t=(1-t)x_0+t\epsilon$ is linear, conditioning both sides on $x_t$ gives $(1-t)\,\mathbb E[x_0\mid x_t]+t\,\mathbb E[\epsilon\mid x_t]=x_t$, and by definition $\mathbb E[x_0\mid x_t]-\mathbb E[\epsilon\mid x_t]=v^*$. Solving the two linear equations:</p>
+
+<div class="math-block">\[ \hat x_0(x_t):=\mathbb E[x_0\mid x_t]=x_t+t\,v^*,\qquad \hat\epsilon(x_t):=\mathbb E[\epsilon\mid x_t]=x_t-(1-t)\,v^*. \]</div>
+
+<p>The score of the noisy marginal follows from Tweedie's formula. Since $p(x_t\mid x_0)=\mathcal N\big((1-t)x_0,\,t^2I\big)$, $\nabla\log p_t(x)=\mathbb E\big[-(x-(1-t)x_0)/t^2\mid x_t=x\big]=-\mathbb E[\epsilon\mid x_t=x]/t$, so</p>
+
+<div class="math-block">\[ \nabla_x\log p_t(x)=-\frac{x-(1-t)\,v^*(x,t)}{t},\qquad v^*(x,t)=\frac{x+t\,\nabla_x\log p_t(x)}{1-t}. \]</div>
+
+<p>These are the "affine conversions" promised in §1. The repo uses the first one directly: the "endpoint" estimate $x_t-t\,v$ appears in <code>src/visual_rl/sampling.py</code> and <code>src/visual_rl/training/nft_sampling.py</code>, with the sign flipped because the code uses the SD3 convention (§6).</p>
+
+<h4>Worked example: a single Gaussian endpoint</h4>
+
+<p>Let $x_0\sim\mathcal N(m,s^2)$ in one dimension. Then $(x_0,x_t)$ is jointly Gaussian with $\operatorname{Var}(x_t)=V_t:=(1-t)^2s^2+t^2$, $\operatorname{Cov}(x_0,x_t)=(1-t)s^2$ and $\operatorname{Cov}(\epsilon,x_t)=t$. Gaussian conditioning gives $\mathbb E[x_0\mid x_t]=m+\tfrac{(1-t)s^2}{V_t}(x_t-(1-t)m)$ and $\mathbb E[\epsilon\mid x_t]=\tfrac{t}{V_t}(x_t-(1-t)m)$. Subtract:</p>
+
+<div class="math-block">\[ v^*(x,t)=m+\frac{(1-t)s^2-t}{(1-t)^2s^2+t^2}\,\big(x-(1-t)m\big). \]</div>
+
+<p>Numbers: $m=2$, $s=0.5$, $t=0.5$, $x=1.5$. Then $V_t=0.25\cdot0.25+0.25=0.3125$, the slope is $(0.125-0.5)/0.3125=-1.2$, and $x-(1-t)m=0.5$, so $v^*=2-0.6=1.4$. A Monte Carlo estimate (average $x_0-\epsilon$ over 38,187 samples whose $x_t$ fell within $0.01$ of $1.5$) gives $1.397$. Check the endpoints: at $t=1$ the slope is $-1$ and $v^*=m-x$, so one Euler step of size $1$ lands exactly on $m$; at $t=0$ the slope is $s^2/s^2=1$ and $v^*=x$, which is $x_0-\mathbb E[\epsilon\mid x_0]=x_0$.</p>
+
+<h3 id="s1-gmm">3. The closed-form ideal velocity for a Gaussian mixture</h3>
+
+<p>Real data is multimodal, so the single Gaussian is too simple. A mixture of Gaussians is the richest case that stays analytic, and it is the endpoint distribution used by the toy code and the widget in this step. Let</p>
+
+<div class="math-block">\[ p(x_0)=\sum_{k=1}^{K_{\text{mix}}}\pi_k\,\mathcal N(x_0;\,m_k,\,s^2I). \]</div>
+
+<p>Condition on the component $k$ first. Inside component $k$ everything is the single-Gaussian case, with $x_t\mid k\sim\mathcal N\big((1-t)m_k,\,V_tI\big)$ and $V_t=(1-t)^2s^2+t^2$. The posterior probability of component $k$ given the noisy point is a softmax:</p>
+
+<div class="math-block">\[ w_k(x,t)=\frac{\pi_k\,\mathcal N\big(x;(1-t)m_k,V_tI\big)}{\sum_j\pi_j\,\mathcal N\big(x;(1-t)m_j,V_tI\big)},\qquad v^*(x,t)=\sum_k w_k(x,t)\Big[m_k+\frac{(1-t)s^2-t}{V_t}\big(x-(1-t)m_k\big)\Big]. \]</div>
+
+<p>Read it as attention over modes. Near $t=1$ every $V_t\approx1$ and the $(1-t)m_k$ are close to $0$, so the weights stay near the priors $\pi_k$ and the field points at the overall mean. As $t$ decreases, the components separate in $x_t$-space, the softmax sharpens, and each particle commits to one mode. The commitment happens early on the noisy end, which is why the paper's trust-region weight multiplies by $t$ to emphasize high-noise states (the paper, §4.3) and why the mode a sample ends in is mostly decided in the first few steps.</p>
+
+<p>Two properties make this formula useful later. First, reweighting endpoints by a function that is constant within each component only changes the $\pi_k$, so you can compute the positive, negative and tilted forward fields of Step 3 exactly. Second, setting $\pi$ to a one-hot vector gives a <em>conditional</em> field for that component, which is how the widget and the CFG example produce $v(x\mid c)$ without training anything. The implementation is ten lines (<code>ideal_velocity</code> in the toy below); it computes the softmax in log space for numerical stability and drops the Gaussian normalizer, which is the same for all components because they share $s$.</p>
+
+<h3 id="s1-ode">4. Sampling as an ODE</h3>
+
+<p>Given a velocity field, generation solves the ODE $\tfrac{dx_t}{d(-t)}=v(x_t,t,c)$ from $x_1=\epsilon\sim\mathcal N(0,I)$ to $t=0$. The simplest solver is Euler on a decreasing grid $1=t_0&gt;t_1&gt;\dots&gt;t_N=0$. With step size $\Delta_n=t_n-t_{n+1}&gt;0$:</p>
+
+<div class="math-block">\[ x_{t_{n+1}}=x_{t_n}+\Delta_n\,v_\theta(x_{t_n},t_n,c). \]</div>
+
+<p>This is the paper's ODE step. Three properties matter for RL:</p>
+
+<ul>
+  <li><strong>The sampler is a deterministic map.</strong> Given the prompt and the initial noise, the endpoint is fixed. The $K$ samples per prompt differ only through their initial noise $x_1$. The randomness lives entirely at $t=1$.</li>
+  <li><strong>Each step costs one network evaluation</strong> (two with CFG, see §5). For a 2.5B-parameter transformer on a $64\times64$ latent, a step is a full forward pass, so step count is the main cost knob. The paper's SD3.5-M rollouts use 10 steps; evaluation uses 40 (the repo's <code>configs/paper/image/sd3_geneval_art.yaml</code>).</li>
+  <li><strong>Few steps cost accuracy.</strong> The ideal trajectories are curved (the field changes as the posterior sharpens), and Euler follows the tangent. With one step from $t=1$, $x_0=x_1+1\cdot v^*(x_1,1)$. Using the conversion of §2, $x_t+t\,v^*=\mathbb E[x_0\mid x_t]$, so one Euler step returns $\mathbb E[x_0\mid x_1]$, which at $t=1$ is just the data mean: every noise sample collapses to the same blurry average. The toy output below shows exactly this.</li>
+</ul>
+
+<h4>Why integrating the marginal field produces the right distribution</h4>
+
+<p>Let $p_t$ be the distribution of $x_t=(1-t)x_0+t\epsilon$. A density moved by a velocity field obeys the continuity equation (conservation of probability mass). In increasing time the motion is $dx/dt=-v$, so</p>
+
+<div class="math-block">\[ \partial_t p_t(x)+\nabla\!\cdot\!\big(p_t(x)\,(-v^*(x,t))\big)=0 . \]</div>
+
+<p>Here is the intuition for why $v^*$ satisfies it. Each straight conditional path, with its own constant velocity $-u_t$, moves its own little conditional density $p_t(x\mid x_0,\epsilon)$ consistently. Summing over all pairs, the total probability flux through a point $x$ is $\mathbb E\big[-u_t\,\delta(x_t-x)\big]=-p_t(x)\,\mathbb E[u_t\mid x_t=x]=-p_t(x)\,v^*(x,t)$. So the marginal field carries exactly the flux of all the conditional paths combined, and starting from $p_1=\mathcal N(0,I)$ the ODE reproduces every intermediate $p_t$, ending at $p_0=p_{\text{data}}$. Lipman et al. (2022) give the full proof. The point to keep: the averaged field produces the right <em>marginals</em>, but its trajectories are not the straight conditional segments; they bend, and they never cross.</p>
+
+<h4>How the repo takes an Euler step</h4>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/sampling.py · L74–87</span> the repo's ODE step (SD3 sign convention: velocity points toward noise)</figcaption>
+  <pre><code class="language-python">%%REPO_ODE%%</code></pre>
+</figure>
+
+<p>Here <code>t</code> is the current sigma and <code>nxt</code> the next one, so <code>dt = nxt - t</code> is <em>negative</em>. The line <code>x + dt * v</code> therefore subtracts the model output. That is correct because the SD3 transformer predicts $v_{\text{SD3}}=\epsilon-x_0=-u_t$: $x+(t_{\text{next}}-t)\,v_{\text{SD3}}=x_t+\Delta\,(x_0-\epsilon)$. The paper's $v_\theta$ is therefore minus the network output. The <code>cps_zero_noise</code> branch is an algebraically different deterministic update (it rebuilds $x_t$ from $\hat x_0=x-tv$ and $\hat x_1=x+(1-t)v$); you can ignore it for now. The repo also has a second-order multistep solver (<code>solver="dpm2"</code> in <code>src/visual_rl/training/nft_sampling.py</code>) used for NFT endpoint collection; it uses one network evaluation per step like Euler but corrects the curvature with the previous step's $\hat x_0$.</p>
+
+<div class="callout warn"><p class="callout-title">Pitfall</p><p>Do not assume more steps means a different distribution. For an exact field, every step count targets the same $p_0$; steps only control discretization error. But for a <em>trained</em> field the endpoint distribution does depend on the step count and solver, which is one concrete source of the paper's forward–reverse gap $e$: the endpoints you score come from the discretized sampler, not from the ideal ODE.</p></div>
+
+<h3 id="s1-sde">5. ODE versus SDE sampling</h3>
+
+<h4>Same marginals, injected noise</h4>
+
+<p>The ODE is not the only process with marginals $p_t$. Consider, in increasing time, the stochastic differential equation (SDE)</p>
+
+<div class="math-block">\[ dx=\Big[f_t(x)+\tfrac{g_t^2}{2}\nabla\log p_t(x)\Big]dt+g_t\,dW,\qquad f_t:=-v^*, \]</div>
+
+<p>where $W$ is a Brownian motion and $g_t\ge0$ is any noise schedule. Its density obeys the Fokker–Planck equation $\partial_tp=-\nabla\!\cdot\!\big(p f\big)-\nabla\!\cdot\!\big(\tfrac{g^2}{2}p\nabla\log p\big)+\tfrac{g^2}{2}\Delta p$. Since $p\nabla\log p=\nabla p$, the last two terms are $-\tfrac{g^2}{2}\Delta p+\tfrac{g^2}{2}\Delta p=0$, leaving the continuity equation of the ODE. So for every choice of $g_t$ the SDE has the same marginals as the ODE. The extra drift exactly compensates the diffusion the noise causes.</p>
+
+<p>For generation we run time backward. The time reversal of a forward SDE $dx=F\,dt+g\,dW$ is $dx=\big[F-g^2\nabla\log p_t\big]dt+g\,d\bar W$ with $dt&lt;0$ (Anderson, 1982). With $F=f+\tfrac{g^2}{2}\nabla\log p$ this is $dx=\big[f-\tfrac{g^2}{2}\nabla\log p_t\big]dt+g\,d\bar W$. Take one Euler–Maruyama step from $t$ to $t-h$ ($h&gt;0$, $dt=-h$, $f=-v$):</p>
+
+<div class="math-block">\[ x_{t-h}=x_t+h\Big[v+\tfrac{g_t^2}{2}\nabla\log p_t(x_t)\Big]+g_t\sqrt h\,z,\qquad z\sim\mathcal N(0,I). \]</div>
+
+<p>Substitute the score from §2, $\nabla\log p_t=-(x_t-(1-t)v)/t$, and choose the Flow-GRPO noise schedule $g_t^2=\nu^2\,t/(1-t)$ (Liu et al., 2025), with a scalar noise level $\nu$. Then $\tfrac{g_t^2(1-t)}{2t}=\tfrac{\nu^2}{2}$ and $\tfrac{g_t^2}{2t}=\tfrac{\nu^2}{2(1-t)}$, and the step becomes a Gaussian transition</p>
+
+<div class="math-block">\[ x_{t-h}\sim\mathcal N\big(\mu(s_t,v),\ \sigma_{\text{ref}}^2(t)\,I\big),\qquad \mu(s_t,v)=x_t+h\Big[\Big(1+\frac{\nu^2}{2}\Big)v-\frac{\nu^2}{2(1-t)}\,x_t\Big],\qquad \sigma_{\text{ref}}^2(t)=\nu^2\,\frac{t}{1-t}\,h . \]</div>
+
+<p>This is exactly the reference transition in the paper's Appendix C.2 (it writes $\mu(s_t,v)$ and $\sigma^2_{\text{ref}}(t)$ and uses $\nu=0.8$). Setting $\nu=0$ recovers the Euler ODE step. The coefficient $t/(1-t)$ blows up at $t=1$: the paper uses the endpoint convention $\mu=x_t+hv$, $\sigma_{\text{ref}}^2(1)=\nu^2$ there, while the repo's sampler replaces $1-t$ by $1-t_1$ (the next grid point) at $t=1$.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/sampling.py · L94–102</span> Flow-GRPO SDE step in the repo (SD3 sign, <code>dt &lt; 0</code>)</figcaption>
+  <pre><code class="language-python">%%REPO_SDE%%</code></pre>
+</figure>
+
+<p>Map it to the formula: <code>diffusion</code> is $g_t=\nu\sqrt{t/(1-t)}$ with <code>noise_level</code> $=\nu$ (repo default $0.7$). Expanding, the mean is $x+dt\,\big[v_{\text{SD3}}+\tfrac{g_t^2}{2t}\big(x+(1-t)\,v_{\text{SD3}}\big)\big]$, which is Flow-GRPO's drift written in the SD3 sign; substitute $v_{\text{SD3}}=-v$ and $dt=-h$ and you get $\mu(s_t,v)$ above. The standard deviation is $g_t\sqrt h$.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/sampling.py · L117–125</span> the Gaussian log-prob of the realized transition</figcaption>
+  <pre><code class="language-python">%%REPO_LOGP%%</code></pre>
+</figure>
+
+<h4>The consequence that matters for RL: who has a log-prob</h4>
+
+<p>An SDE step is a Gaussian with a known mean and variance, so you can evaluate $\log p_\theta(x_{t-h}\mid x_t,c)=-\tfrac{\lVert x_{t-h}-\mu_\theta\rVert^2}{2\sigma^2}-D\log\sigma-\tfrac D2\log2\pi$ for any $\theta$, where $D$ is the number of coordinates. (The repo averages over coordinates instead of summing, the <code>.mean(1)</code> above, which rescales log-probs and KLs by $1/D$, exactly as the paper's KL proxy divides by $D$.) That is everything PPO needs. Flow-GRPO treats each step as an action and uses the per-step ratio</p>
+
+<div class="math-block">\[ \rho=\frac{p_\theta(x_{t-h}\mid x_t,c)}{p_{\text{old}}(x_{t-h}\mid x_t,c)},\qquad \log\rho=\frac{\lVert x_{t-h}-\mu_{\text{old}}\rVert^2-\lVert x_{t-h}-\mu_\theta\rVert^2}{2\sigma_{\text{ref}}^2(t)}, \]</div>
+
+<p>since both policies share $\sigma_{\text{ref}}(t)$ and differ only through $v$ in the mean (the paper, Appendix C.1). An ODE step is a point mass, $x_{t-h}=x_t+hv_\theta$. It has no density, the ratio between two different ODE policies is $0$ or undefined, and the KL between them is infinite. <strong>An SDE step has a computable log-prob; an ODE step has none.</strong></p>
+
+<p>This one fact organizes diffusion RL. Reverse-process methods (Flow-GRPO, DanceGRPO) must roll out with an SDE to get ratios, paying for injected noise that degrades samples at few steps. Forward-process methods (DiffusionNFT, DiffusionART) never need a likelihood: they train with MSE on velocities and can roll out with the deterministic ODE. DiffusionART still wants a PPO-like trust region, so it borrows the SDE only as a <em>reference</em> to define a KL proxy. Because the two reference Gaussians share $\sigma_{\text{ref}}$, their KL is $\lVert\mu_\theta-\mu_{\text{old}}\rVert^2/(2\sigma_{\text{ref}}^2)$ and $\mu_\theta-\mu_{\text{old}}=h(1+\nu^2/2)\,(v_\theta-v_{\text{old}})$. The rollout itself remains an ODE (the paper, §4.3). Step 5 builds this mask.</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>In LLM RL the policy is stochastic by construction (a softmax), so log-probs are free and "temperature 0" is the special case. In flow models the natural sampler is deterministic and stochasticity is something you add, with a knob $\nu$, purely so that a likelihood exists. Raising $\nu$ is not like raising temperature: the SDE has the <em>same</em> marginals for every $\nu$ in continuous time. It changes how much each step is randomized, not what distribution you sample, up to discretization error.</p></div>
+
+<h4>Worked example: one SDE step</h4>
+
+<p>Take the toy mixture used below, the unconditional field at $x_t=(0.5,0.5)$, $t=0.5$, which is $v=(-0.355,\,1.961)$, a step $h=0.1$ and $\nu=0.7$.</p>
+<ul>
+  <li>ODE: $x_{0.4}=x_t+0.1\,v=(0.4645,\,0.6961)$.</li>
+  <li>SDE: $g_t^2=0.49\cdot0.5/0.5=0.49$, $\sigma_{\text{ref}}=\sqrt{0.49\cdot0.1}=0.2214$. The mean is $x_t+0.1\big[1.245\,v-0.49\,x_t\big]=(0.4313,\,0.7196)$. The mean is pulled slightly toward the origin by the $-x_t$ term and pushed further along $v$, which makes room for the injected noise.</li>
+  <li>If the realized noise is $z=(1,-0.5)$, the sample is $\mu+0.2214z$ and its log-density is $-\tfrac{1.25}{2}-2\log0.2214-\log2\pi=0.553$. At $z=0$ it is $1.178$. Log-densities of continuous variables can be positive; only differences (ratios) are meaningful.</li>
+  <li>KL proxy: with the paper's $\nu=0.8$, $\sigma_{\text{ref}}^2=0.064$. If the trained velocity drifts by $d=(0.05,0.05)$, then $\Delta\mu=0.1\cdot1.32\cdot d$, $\lVert\Delta\mu\rVert^2=8.71\times10^{-5}$, and $m=\lVert\Delta\mu\rVert^2/(2D\sigma_{\text{ref}}^2)=3.4\times10^{-4}$, well above the paper's threshold $\delta=10^{-5}$.</li>
+</ul>
+
+<h3 id="s1-toy">6. A complete toy: flow matching on a 2D mixture</h3>
+
+<p>The script below trains a small MLP velocity field with the flow-matching loss on the three-component mixture $\pi=(0.5,0.3,0.2)$, means $(-2,-1.5),(2,-1.5),(0,2)$, $s=0.35$. It then compares the trained field with the closed-form $v^*$, and samples with Euler ODE at several step counts and with the Flow-GRPO SDE. It is one file, shown in two parts.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> part 1: data, closed-form ideal velocity, flow-matching training</figcaption>
+  <pre><code class="language-python">%%TOY1%%</code></pre>
+</figure>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> part 2: Euler ODE and Flow-GRPO SDE samplers, statistics (same file)</figcaption>
+  <pre><code class="language-python">%%TOY2%%</code></pre>
+</figure>
+
+<p>Real output (about 30 s on a laptop CPU):</p>
+<pre><code class="language-text">%%TOY_OUT%%</code></pre>
+
+<p>How to read it:</p>
+<ul>
+  <li><strong>Regression learns the conditional expectation.</strong> The learned field's loss (3.897) sits on the irreducible floor of the ideal field (3.892), and the mean squared distance between the two fields is $0.0055$, against a loss of about $3.9$. The single-batch training losses printed during training are noisy estimates of the same quantity.</li>
+  <li><strong>Step count.</strong> One Euler step sends every sample to the data mean $(-0.4,-0.8)$, which is nearest mode A, so "mode frac" reads $[1,0,0]$. Two steps get the mode proportions roughly right but are far too wide. Eight steps are close, and fifty match the data to within sampling noise.</li>
+  <li><strong>The learned field versus $v^*$.</strong> At 50 steps the closed-form field reproduces the true within-mode spread $0.35$ almost exactly; the learned field is slightly too wide (0.357 to 0.381). That excess is a small, measurable instance of the gap between a sampler's field and the ideal forward field of its target.</li>
+  <li><strong>SDE.</strong> With $\nu=0.7$ and 50 steps the SDE matches the ODE's marginals, as the Fokker–Planck argument predicts. With 10 steps it is noticeably wider (0.374 to 0.426); injected noise adds discretization error, which is one reason Flow-GRPO-style training needs more rollout steps. The SDE also reports a trajectory log-density; the ODE cannot.</li>
+</ul>
+
+<h3 id="s1-widget">7. Interactive: particles under the ideal field</h3>
+
+<p>The widget integrates the closed-form mixture field of §3 in your browser, with no training. Grey dots are the data distribution; teal lines are particle trajectories from Gaussian noise at $t=1$ to endpoints (vermilion) at $t=0$. Try these: set steps to 1 and watch everything collapse to the mean; switch to SDE and vary the noise level at 40 steps (the endpoints barely change) and at 4 steps (they spread out); pick a condition and raise the guidance scale above 1.</p>
+
+<figure class="widget" id="w1-flow">
+  <canvas aria-label="Particles flowing from Gaussian noise to a 2D Gaussian mixture under the ideal velocity field"></canvas>
+  <div class="widget-controls">
+    <label>Sampler
+      <select id="w1-sampler"><option value="ode" selected>ODE (Euler)</option><option value="sde">SDE (Flow-GRPO)</option></select>
+    </label>
+    <label>Noise level ν <input type="range" id="w1-nu" min="0.1" max="1" step="0.05" value="0.7"> <span id="w1-nu-val">0.70</span></label>
+    <label>Steps <input type="range" id="w1-steps" min="1" max="50" step="1" value="12"> <span id="w1-steps-val">12</span></label>
+    <label>Condition
+      <select id="w1-cond"><option value="-1" selected>unconditional (all modes)</option><option value="0">mode A (π=0.5)</option><option value="1">mode B (π=0.3)</option><option value="2">mode C (π=0.2)</option></select>
+    </label>
+    <label>Guidance w <input type="range" id="w1-w" min="0" max="6" step="0.25" value="1"> <span id="w1-w-val">1.00</span></label>
+    <button type="button" id="w1-reseed">New noise</button>
+    <button type="button" id="w1-play">Play</button>
+    <p id="w1-out" aria-live="polite"></p>
+  </div>
+  <figcaption>Closed-form ideal velocity $v^*$ for the mixture $\pi=(0.5,0.3,0.2)$, $s=0.35$, the same distribution as the toy. "Condition" uses a one-hot $\pi$ for the conditional field; the guided field is $v_{\text{uncond}}+w\,(v_{\text{cond}}-v_{\text{uncond}})$. The SDE uses the Flow-GRPO step of §5 (it needs at least 2 steps here because of the $t=1$ guard).</figcaption>
+</figure>
+<script>
+(() => {
+  const root = document.getElementById('w1-flow');
+  if (!root) return;
+  const canvas = root.querySelector('canvas');
+  const ctx = canvas.getContext('2d');
+  const q = (id) => root.querySelector('#' + id);
+  const el = { sampler: q('w1-sampler'), nu: q('w1-nu'), steps: q('w1-steps'), cond: q('w1-cond'), w: q('w1-w'),
+    reseed: q('w1-reseed'), play: q('w1-play'), out: q('w1-out'), nuVal: q('w1-nu-val'), stepsVal: q('w1-steps-val'), wVal: q('w1-w-val') };
+  const MEANS = [[-2, -1.5], [2, -1.5], [0, 2]], PI = [0.5, 0.3, 0.2], S = 0.35, NAMES = ['A', 'B', 'C'];
+  const N = 360, NDRAW = 150, X0 = -4.4, X1 = 4.4, Y0 = -3.8, Y1 = 4.1;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let seed = 7, sim = null, anim = null, progress = 1, W = 0, H = 0, dpr = 1;
+
+  function rng(s) { let a = s >>> 0; return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+  function gauss(r) { let u = 0; while (u === 0) u = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); }
+
+  function vel(x, y, t, pi) {
+    const V = (1 - t) * (1 - t) * S * S + t * t, c = ((1 - t) * S * S - t) / V;
+    const lw = [], dxs = [], dys = []; let mx = -Infinity;
+    for (let k = 0; k < 3; k++) {
+      const dx = x - (1 - t) * MEANS[k][0], dy = y - (1 - t) * MEANS[k][1];
+      dxs.push(dx); dys.push(dy);
+      const l = pi[k] > 0 ? Math.log(pi[k]) - (dx * dx + dy * dy) / (2 * V) : -Infinity;
+      lw.push(l); if (l > mx) mx = l;
+    }
+    let Z = 0, vx = 0, vy = 0;
+    for (let k = 0; k < 3; k++) {
+      if (lw[k] === -Infinity) continue;
+      const w = Math.exp(lw[k] - mx); Z += w;
+      vx += w * (MEANS[k][0] + c * dxs[k]); vy += w * (MEANS[k][1] + c * dys[k]);
+    }
+    return [vx / Z, vy / Z];
+  }
+  function field(x, y, t) {
+    const vu = vel(x, y, t, PI), k = +el.cond.value;
+    if (k < 0) return vu;
+    const oh = [0, 0, 0]; oh[k] = 1;
+    const vc = vel(x, y, t, oh), w = +el.w.value;
+    return [vu[0] + w * (vc[0] - vu[0]), vu[1] + w * (vc[1] - vu[1])];
+  }
+
+  function simulate() {
+    const sde = el.sampler.value === 'sde', nu = +el.nu.value;
+    let n = +el.steps.value; if (sde && n < 2) n = 2;
+    const ts = []; for (let i = 0; i <= n; i++) ts.push(1 - i / n);
+    const r = rng(seed), paths = [], counts = [0, 0, 0]; let logp = 0;
+    for (let p = 0; p < N; p++) {
+      let x = gauss(r), y = gauss(r); const path = [[x, y]];
+      for (let i = 0; i < n; i++) {
+        const t = ts[i], h = t - ts[i + 1], v = field(x, y, t);
+        if (!sde) { x += h * v[0]; y += h * v[1]; }
+        else {
+          const tg = i === 0 ? ts[1] : t, g2 = nu * nu * t / (1 - tg), sd = Math.sqrt(g2 * h);
+          const mxv = x + h * (v[0] + g2 / (2 * t) * ((1 - t) * v[0] - x));
+          const myv = y + h * (v[1] + g2 / (2 * t) * ((1 - t) * v[1] - y));
+          const z1 = gauss(r), z2 = gauss(r);
+          x = mxv + sd * z1; y = myv + sd * z2;
+          logp += -(z1 * z1 + z2 * z2) / 2 - 2 * Math.log(sd) - Math.log(2 * Math.PI);
+        }
+        path.push([x, y]);
+      }
+      let best = 0, bd = Infinity;
+      for (let k = 0; k < 3; k++) { const d = (x - MEANS[k][0]) ** 2 + (y - MEANS[k][1]) ** 2; if (d < bd) { bd = d; best = k; } }
+      counts[best]++; paths.push(path);
+    }
+    const r2 = rng(12345), data = [];
+    for (let i = 0; i < 700; i++) { let u = r2(), k = u < PI[0] ? 0 : (u < PI[0] + PI[1] ? 1 : 2);
+      data.push([MEANS[k][0] + S * gauss(r2), MEANS[k][1] + S * gauss(r2)]); }
+    sim = { paths, counts, data, sde, n, logp: sde ? logp / N : null, clamped: sde && +el.steps.value < 2 };
+  }
+
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888'; }
+  function resize() {
+    const cw = Math.max(240, root.clientWidth || 600);
+    const ch = Math.min(480, Math.round(cw * 0.86));
+    dpr = window.devicePixelRatio || 1; W = cw; H = ch;
+    canvas.style.width = cw + 'px'; canvas.style.height = ch + 'px';
+    canvas.width = Math.round(cw * dpr); canvas.height = Math.round(ch * dpr);
+    draw();
+  }
+  function draw() {
+    if (!sim || !W) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const sc = Math.min(W / (X1 - X0), H / (Y1 - Y0)), ox = (W - sc * (X1 - X0)) / 2, oy = (H - sc * (Y1 - Y0)) / 2;
+    const P = (x, y) => [ox + (x - X0) * sc, oy + (Y1 - y) * sc];
+    const fg = css('--fg'), muted = css('--muted'), acc = css('--accent'), acc2 = css('--accent-2'), line = css('--line');
+    ctx.fillStyle = css('--surface'); ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 0.35; ctx.fillStyle = muted;
+    for (const [x, y] of sim.data) { const [a, b] = P(x, y); ctx.beginPath(); ctx.arc(a, b, 1.6, 0, 6.283); ctx.fill(); }
+    ctx.globalAlpha = 1; ctx.font = '13px system-ui, sans-serif'; ctx.fillStyle = fg;
+    const k = +el.cond.value;
+    MEANS.forEach((m, j) => { const [a, b] = P(m[0], m[1]); ctx.fillText(NAMES[j], a + 0.55 * sc, b - 0.45 * sc);
+      if (j === k) { ctx.strokeStyle = fg; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(a, b, 0.75 * sc, 0, 6.283); ctx.stroke(); } });
+    const n = sim.n, upto = progress * n, iFull = Math.floor(upto), frac = upto - iFull;
+    ctx.strokeStyle = acc; ctx.lineWidth = 1; ctx.globalAlpha = 0.38;
+    for (let p = 0; p < NDRAW; p++) {
+      const path = sim.paths[p]; ctx.beginPath(); let [a, b] = P(path[0][0], path[0][1]); ctx.moveTo(a, b);
+      for (let i = 1; i <= Math.min(iFull, n); i++) { [a, b] = P(path[i][0], path[i][1]); ctx.lineTo(a, b); }
+      if (iFull < n && frac > 0) { const s0 = path[iFull], s1 = path[iFull + 1];
+        [a, b] = P(s0[0] + frac * (s1[0] - s0[0]), s0[1] + frac * (s1[1] - s0[1])); ctx.lineTo(a, b); }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 0.7; ctx.fillStyle = muted;
+    for (let p = 0; p < NDRAW; p++) { const [a, b] = P(sim.paths[p][0][0], sim.paths[p][0][1]); ctx.fillRect(a - 1, b - 1, 2, 2); }
+    ctx.globalAlpha = 1; ctx.fillStyle = acc2;
+    for (let p = 0; p < NDRAW; p++) {
+      const path = sim.paths[p], i = Math.min(iFull, n), s0 = path[i], s1 = path[Math.min(i + 1, n)];
+      const f = i < n ? frac : 0, [a, b] = P(s0[0] + f * (s1[0] - s0[0]), s0[1] + f * (s1[1] - s0[1]));
+      ctx.beginPath(); ctx.arc(a, b, 2.2, 0, 6.283); ctx.fill();
+    }
+    ctx.fillStyle = muted; ctx.font = '12px system-ui, sans-serif';
+    ctx.fillText('t = ' + (1 - progress).toFixed(2), 8, H - 8);
+    ctx.strokeStyle = line; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+  }
+  function report() {
+    const c = sim.counts.map(v => (100 * v / N).toFixed(0) + '%').join(' / ');
+    const k = +el.cond.value;
+    let s = 'Endpoints in modes A / B / C: ' + c + (k < 0 ? ' (data: 50% / 30% / 20%). ' : ' (conditioned on mode ' + NAMES[k] + ', w = ' + (+el.w.value).toFixed(2) + '). ');
+    s += sim.sde ? 'Mean trajectory log-density: ' + sim.logp.toFixed(1) + ' (sum of ' + sim.n + ' Gaussian step log-densities).'
+                 : 'ODE: deterministic map, no transition log-prob.';
+    if (sim.clamped) s += ' SDE uses 2 steps minimum.';
+    el.out.textContent = s;
+  }
+  function update() {
+    el.nuVal.textContent = (+el.nu.value).toFixed(2); el.stepsVal.textContent = el.steps.value; el.wVal.textContent = (+el.w.value).toFixed(2);
+    el.nu.disabled = el.sampler.value !== 'sde'; el.w.disabled = +el.cond.value < 0;
+    if (anim) { cancelAnimationFrame(anim); anim = null; }
+    progress = 1; simulate(); report(); draw();
+  }
+  function play() {
+    if (anim) cancelAnimationFrame(anim);
+    if (reduce.matches) { progress = 1; draw(); return; }
+    const t0 = performance.now(), dur = 2600;
+    const tick = (now) => { progress = Math.min(1, (now - t0) / dur); draw(); anim = progress < 1 ? requestAnimationFrame(tick) : null; };
+    anim = requestAnimationFrame(tick);
+  }
+  ['input', 'change'].forEach(ev => [el.sampler, el.nu, el.steps, el.cond, el.w].forEach(c => c.addEventListener(ev, update)));
+  el.reseed.addEventListener('click', () => { seed = (seed * 1103515245 + 12345) >>> 0; update(); });
+  el.play.addEventListener('click', play);
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', draw);
+  if (window.ResizeObserver) new ResizeObserver(resize).observe(root); else window.addEventListener('resize', resize);
+  simulate(); report(); resize();
+})();
+</script>
+
+<h3 id="s1-cfg">8. Classifier-free guidance</h3>
+
+<h4>Motivation</h4>
+
+<p>A text-conditioned model $v_\theta(x_t,t,c)$ trained only by flow matching samples from $p(x_0\mid c)$, and in practice those samples often follow the prompt loosely. Classifier-free guidance (CFG; Ho and Salimans, 2022) is the standard inference-time fix. It sharpens the conditional distribution toward samples that are more typical of $c$ than of images in general, trading diversity for prompt adherence.</p>
+
+<h4>The formula</h4>
+
+<p>During pretraining the prompt is dropped (replaced by an empty or null embedding) for a fraction of examples, so the same network also learns the unconditional field $v_\theta(x_t,t,\varnothing)$. At sampling time, evaluate both and extrapolate:</p>
+
+<div class="math-block">\[ v_{\text{cfg}}(x_t,t,c)=v_\theta(x_t,t,\varnothing)+w\,\big[v_\theta(x_t,t,c)-v_\theta(x_t,t,\varnothing)\big]. \]</div>
+
+<p>$w$ is the <strong>guidance scale</strong>. $w=1$ is the plain conditional model, $w=0$ is unconditional, and $w&gt;1$ (typical values 3.5 to 7 for SD3-class models) extrapolates past the conditional field.</p>
+
+<h4>Why it works: Bayes' rule on scores</h4>
+
+<p>By Bayes' rule $p_t(x\mid c)\propto p_t(x)\,p_t(c\mid x)$, so $\nabla\log p_t(x\mid c)=\nabla\log p_t(x)+\nabla\log p_t(c\mid x)$. The second term is the gradient of an implicit classifier: it points toward noisy states that make the prompt more likely. CFG amplifies it by $w$:</p>
+
+<div class="math-block">\[ \nabla\log p_t(x)+w\,\nabla\log p_t(c\mid x)=(1-w)\,\nabla\log p_t(x)+w\,\nabla\log p_t(x\mid c)=\nabla\log\Big[p_t(x)^{1-w}\,p_t(x\mid c)^{w}\Big]. \]</div>
+
+<p>Why does a score formula apply to velocities? From §2, at fixed $(x,t)$ the velocity is an affine function of the score with condition-independent coefficients: $v=(x+t\,\nabla\log p_t)/(1-t)$. An affine map preserves combinations whose weights sum to one, and $(1-w)+w=1$. So the velocity combination above is exactly the guided score translated into velocity space. The target is, roughly, the sharpened distribution $p(x)^{1-w}p(x\mid c)^w\propto p(x\mid c)\,p(c\mid x)^{w-1}$. ("Roughly" because the guided noisy marginals are not exactly the noised version of one fixed endpoint distribution; CFG is a heuristic in that sense.)</p>
+
+<p>In the repo, CFG is three lines inside the SD3 velocity adapter. The batch is doubled with the negative (empty) prompt first:</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/models/sd3.py · L95–97</span> CFG combination in the SD3 adapter</figcaption>
+  <pre><code class="language-python">%%REPO_CFG%%</code></pre>
+</figure>
+
+<p>Because the combination is linear and both terms share the same sign convention, the SD3 sign flip does not affect this formula.</p>
+
+<h4>Worked numbers</h4>
+
+<p>Use the toy mixture with condition $c=$ "mode C" (mean $(0,2)$). At $x_t=(0.5,0.5)$, $t=0.5$, the closed-form fields are $v_{\text{uncond}}=(-0.355,\,1.961)$ and $v_{\text{cond}}=(-0.782,\,2.782)$. With $w=3$, $v_{\text{cfg}}=v_{\text{uncond}}+3\,(-0.427,\,0.821)=(-1.635,\,4.423)$. Sampling with 50 Euler steps from the guided closed-form field (<code>cfg_toy.py</code>):</p>
+
+<pre><code class="language-text">%%CFG_OUT%%</code></pre>
+
+<p>At $w=0$ only 20% of samples land in mode C (its prior weight). At $w=1$ all of them do, with the correct mean $(0,2)$ and spread $0.35$. At $w=2$ and $w=4$ the samples move <em>past</em> the mode, away from the other modes (mean $y$ of $2.36$ and $2.75$), and shrink (std down to $0.19$). That is CFG's signature in images: stronger prompt adherence, saturated colors, less diversity.</p>
+
+<h4>Distilling CFG, and why DiffusionART borrows the word "guidance"</h4>
+
+<p>CFG doubles the cost of every step. <strong>CFG distillation</strong> trains a student network $v_\phi(x_t,t,c)$ to reproduce the guided teacher with a single evaluation, by regression: minimize $\lVert v_\phi(x_t,t,c)-v_{\text{cfg}}(x_t,t,c)\rVert^2$ on states the teacher visits. FLUX.1-dev is distilled this way and takes the scale as an input ("guidance embedding"); HunyuanVideo and the LightX2V Wan2.1-I2V checkpoint used in the paper are CFG-distilled. Consequently the paper runs FLUX with "its built-in guidance embedding at scale 3.5, without additional CFG", and trains SD3.5-M "without CFG" (the paper, §5.1); the repo's SD3.5 configs set <code>guidance_scale: 1</code>.</p>
+
+<p>Keep the shape of CFG distillation in mind: <em>take the current model's velocity, add a direction that makes samples better, and regress the model onto that frozen sum</em>. DiffusionART has exactly this shape. Its frozen target is $v^{\text{ART}}_{\text{tgt}}(s_t)=v_\theta^{(0)}(s_t)+G(c)$, where $G(c)$ is a normalized reward–endpoint covariance (the paper, §4.1). The repo README calls this reward direction "guidance" and describes the method as letting the model internalize reward guidance, "much like distilling CFG". The difference is where the direction comes from: CFG's direction comes from the conditional versus unconditional model; DiffusionART's comes from which of the prompt's $K$ rollouts scored higher. Steps 4 and 5 develop this.</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>CFG is logit arithmetic. In LLM terms it is $\ell_{\text{uncond}}+w(\ell_{\text{cond}}-\ell_{\text{uncond}})$ on logits, the same form as contrastive decoding and "CFG for language models", and it samples from $p(y\mid c)\,p(c\mid y)^{w-1}$. Distilling it is like fine-tuning a model on its own contrastively decoded outputs so that you no longer need two forward passes.</p></div>
+
+<h3 id="s1-latent">9. Latent diffusion and practicalities</h3>
+
+<h4>VAE latents</h4>
+
+<p>SD3, FLUX, HunyuanVideo and Wan do not run the flow in pixel space. A pretrained variational autoencoder (VAE) compresses images (or video frames) into a latent tensor, and the flow is learned on latents. For SD3.5-M the latent has 16 channels and $8\times$ spatial downsampling, so a $512\times512$ image is a $16\times64\times64$ latent (<code>latent_channels: 16</code>, <code>spatial_factor: 8</code> in <code>configs/examples/sd3_pickscore.yaml</code>). The latent is also normalized with an affine map so that it has roughly unit scale: the model works on $z=(z_{\text{vae}}-\text{shift})\cdot\text{scale}$ with <code>scaling_factor: 1.5305</code>, <code>shift_factor: 0.0609</code>, and decoding inverts it (<code>affine_decode</code> in <code>src/visual_rl/models/base.py</code>: <code>latents / scale + shift</code>). Everything in this tutorial ($x_0$, $x_t$, $v$, the covariance $G(c)$) lives in this normalized latent space. Rewards are computed after decoding to pixels, so a reward is a function of $x_0$ through a fixed decoder.</p>
+
+<h4>Text encoders</h4>
+
+<p>The prompt $c$ enters as embeddings. SD3 uses three frozen encoders: two CLIP text encoders, which provide token embeddings and a pooled vector, and T5-XXL, which provides long token embeddings. The repo calls <code>pipeline.encode_prompt</code> once and caches the outputs (<code>src/visual_rl/models/sd3_text.py</code>); the transformer receives <code>encoder_hidden_states</code> (token embeddings) and <code>pooled_projections</code>. During RL only the transformer (LoRA in the paper's image runs) is trained; the encoders and VAE are frozen.</p>
+
+<h4>Time schedules and shifting</h4>
+
+<p>A uniform grid on $[0,1]$ is not ideal. At high resolution, neighboring latent pixels are strongly correlated, so a given noise level $t$ destroys less information than it would at low resolution, and the model needs more steps at high noise to make the global decisions (layout, which mode). SD3 (Esser et al., 2024) therefore shifts the schedule:</p>
+
+<div class="math-block">\[ t'=\frac{\lambda\,t}{1+(\lambda-1)\,t},\qquad \lambda&gt;0 . \]</div>
+
+<p>With $\lambda=3$ (the repo's SD3.5 setting, <code>shift: 3</code>) and 10 steps, the uniform grid becomes (from <code>cfg_toy.py</code>):</p>
+
+<pre><code class="language-text">%%SHIFT_OUT%%</code></pre>
+
+<p>Half of the steps now sit above $t=0.8$, and the last step jumps from $0.25$ to $0$. The repo implements this in <code>shifted_schedule</code> and, for SD3, takes the grid directly from diffusers' <code>FlowMatchEulerDiscreteScheduler(shift=...)</code> (<code>src/visual_rl/training/image_contracts.py</code>):</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/sampling.py · L25–30</span> static flow shift</figcaption>
+  <pre><code class="language-python">%%REPO_SHIFT%%</code></pre>
+</figure>
+
+<p>Two more conventions: the transformer receives $t\cdot1000$ as its timestep input (<code>timestep_scale = 1000.0</code> in <code>src/visual_rl/models/sd3.py</code>); and the NFT endpoint sampler floors model time to multiples of $1/1000$ to reproduce the SD3 pipeline exactly (<code>quantize_model_time</code> in <code>src/visual_rl/training/nft_sampling.py</code>). Video models use larger shifts (the HunyuanVideo configs use <code>shift: 7.0</code>).</p>
+
+<h4>Sign conventions: SD3/diffusers versus the paper</h4>
+
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>The paper (this tutorial)</th><th>SD3 / diffusers / the repo</th></tr></thead>
+  <tbody>
+    <tr><td>Interpolation</td><td>$x_t=(1-t)x_0+t\epsilon$</td><td>same, $t$ is called sigma</td></tr>
+    <tr><td>Velocity</td><td>$v\approx u_t=x_0-\epsilon$ (toward data)</td><td>$v_{\text{SD3}}\approx\epsilon-x_0$ (toward noise)</td></tr>
+    <tr><td>Euler step</td><td>$x_{t-\Delta}=x_t+\Delta\,v$</td><td><code>x + (t_next - t) * v</code></td></tr>
+    <tr><td>Clean estimate</td><td>$\hat x_0=x_t+t\,v$</td><td><code>x - t * v</code></td></tr>
+    <tr><td>Training target</td><td>$x_0-\epsilon$</td><td>$\epsilon-x_0$</td></tr>
+  </tbody>
+</table></div>
+
+<p>The two conventions describe the same model with $v=-v_{\text{SD3}}$. Squared-error losses are unchanged by flipping both prediction and target, so a sign mismatch only bites when you <em>add</em> a direction (CFG is safe because both terms flip; a reward direction such as $G(c)$, computed in data space, is not) or when you hand-write an update.</p>
+
+<h4>An annotated SD3.5 sampling loop</h4>
+
+<figure class="code">
+  <figcaption><span class="tag">sketch · needs GPU + model weights</span> diffusers-style SD3.5-M sampling with CFG, written out by hand</figcaption>
+  <pre><code class="language-python">%%SD3_SKETCH%%</code></pre>
+</figure>
+
+<p>Every piece maps to a section of this step: the text encoders produce $c$, the scheduler gives the shifted grid, the loop is Euler (§4) in the SD3 sign, the <code>chunk(2)</code> line is CFG (§8), and the last line undoes the latent normalization. An RL rollout in the repo is this loop with $w=1$ (no CFG), batched over $K$ noises per prompt, and with every state $x_t$ and prediction $v$ cached for training.</p>
+
+<div class="callout warn"><p class="callout-title">Pitfalls</p>
+<ul>
+  <li><strong>Sign.</strong> Check every formula you port against the table above. A guidance direction added with the wrong sign trains the model to make samples worse, and the MSE loss will not tell you.</li>
+  <li><strong>The $t=1$ singularity.</strong> The Flow-GRPO SDE coefficient $t/(1-t)$ is infinite at $t=1$. Code must special-case the first step (the repo uses the next grid point; the paper's trust-region reference uses $\sigma_{\text{ref}}^2(1)=\nu^2$).</li>
+  <li><strong>Log-prob normalization.</strong> The repo's transition log-prob is a per-coordinate <em>mean</em>, not a sum. Ratios and KLs computed from it are per-coordinate quantities; thresholds such as $\delta=10^{-5}$ assume that.</li>
+  <li><strong>Steps and noise interact.</strong> SDE sampling at 10 steps is visibly worse than ODE at 10 steps (toy: within-mode std up to 0.43 versus 0.35 for the data). Do not compare an SDE-rolled-out policy and an ODE-rolled-out policy at equal steps and attribute the difference to training.</li>
+  <li><strong>CFG cost and batch layout.</strong> CFG doubles the batch; the repo puts the negative prompt first for SD3 and second for Wan. Mixing up the halves flips the sign of the guidance term.</li>
+  <li><strong>Loss is not quality.</strong> The flow-matching loss has an irreducible floor, and its value depends on the endpoint distribution. Do not read RL progress from the MSE value.</li>
+</ul></div>
+
+<h3 id="s1-exercises">10. Exercises</h3>
+
+<details class="exercise"><summary>Exercise 1.1 — Derive $\mathbb E[u_t\mid x_t]$ for a single Gaussian endpoint $x_0\sim\mathcal N(m,s^2I)$ in $D$ dimensions, and check the limits $t\to0$ and $t\to1$.</summary><div class="solution">
+<p>Coordinates are independent, so work per coordinate. $x_t=(1-t)x_0+t\epsilon$ is Gaussian with mean $(1-t)m$ and variance $V_t=(1-t)^2s^2+t^2$. Covariances: $\operatorname{Cov}(x_0,x_t)=(1-t)s^2$, $\operatorname{Cov}(\epsilon,x_t)=t$. For jointly Gaussian $(a,b)$, $\mathbb E[a\mid b]=\mathbb E a+\tfrac{\operatorname{Cov}(a,b)}{\operatorname{Var}b}(b-\mathbb Eb)$. Hence</p>
+<div class="math-block">\[ \mathbb E[x_0\mid x_t]=m+\tfrac{(1-t)s^2}{V_t}(x_t-(1-t)m),\quad \mathbb E[\epsilon\mid x_t]=\tfrac{t}{V_t}(x_t-(1-t)m), \]</div>
+<div class="math-block">\[ v^*(x_t,t)=\mathbb E[x_0-\epsilon\mid x_t]=m+\frac{(1-t)s^2-t}{V_t}\,(x_t-(1-t)m). \]</div>
+<p>$t\to0$: $V_0=s^2$, slope $1$, $v^*=m+(x_0-m)=x_0$. This is $x_0-\mathbb E[\epsilon\mid x_0]=x_0-0$, since at $t=0$ the state carries no information about $\epsilon$. $t\to1$: $V_1=1$, slope $-1$, $v^*=m-x_1$, so the field points from the current noise straight at the data mean. Numerically, $m=2,s=0.5,t=0.5,x=1.5$ gives $1.4$, and the Monte Carlo check in <code>cfg_toy.py</code> gives $1.397$.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 1.2 — Show that one Euler step from $t$ to $0$ under the ideal velocity returns $\mathbb E[x_0\mid x_t]$. What does one step from $t=1$ produce, and what does that imply for few-step samplers?</summary><div class="solution">
+<p>One step of size $\Delta=t$ gives $x_t+t\,v^*(x_t,t)$. Using $v^*=\mathbb E[x_0\mid x_t]-\mathbb E[\epsilon\mid x_t]$ and $x_t=(1-t)\mathbb E[x_0\mid x_t]+t\,\mathbb E[\epsilon\mid x_t]$ (condition the identity $x_t=(1-t)x_0+t\epsilon$ on $x_t$):</p>
+<div class="math-block">\[ x_t+t\,v^*=(1-t)\hat x_0+t\hat\epsilon+t\hat x_0-t\hat\epsilon=\hat x_0=\mathbb E[x_0\mid x_t]. \]</div>
+<p>At $t=1$, $x_1=\epsilon$ is independent of $x_0$, so $\mathbb E[x_0\mid x_1]=\mathbb E[x_0]$: every noise sample maps to the data mean. The toy confirms it ("one-step Euler from t=1 lands at [-0.4 -0.8]", the mixture mean). The ideal velocity gives the <em>posterior mean</em>, which for multimodal data is not a sample. Few-step generation therefore needs either many steps, a higher-order solver, or a distilled model that is trained to jump to samples rather than means (this is what "step-distilled" means for the Wan checkpoint in the paper).</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 1.3 — Compute the CFG velocity by hand. For the toy mixture and condition "mode C" ($m=(0,2)$, $s=0.35$), compute $v_{\text{cond}}$ at $x_t=(0.5,0.5)$, $t=0.5$, then $v_{\text{cfg}}$ with $w=3$ given $v_{\text{uncond}}=(-0.355,1.961)$. Also: which distribution does CFG target, in terms of $p(x\mid c)$ and $p(c\mid x)$?</summary><div class="solution">
+<p>One-hot $\pi$ reduces the mixture to the single Gaussian of Exercise 1.1. $V=0.25\cdot0.1225+0.25=0.280625$. Slope $=(0.5\cdot0.1225-0.5)/0.280625=-0.43875/0.280625=-1.5635$. $x-(1-t)m=(0.5,0.5)-(0,1)=(0.5,-0.5)$. So $v_{\text{cond}}=(0,2)-1.5635\,(0.5,-0.5)=(-0.782,\,2.782)$.</p>
+<p>$v_{\text{cond}}-v_{\text{uncond}}=(-0.427,\,0.821)$, so $v_{\text{cfg}}=(-0.355-1.281,\ 1.961+2.463)=(-1.636,\,4.424)$, matching the script's $(-1.635,4.423)$ up to rounding. The guided score is $\nabla\log[p(x)^{1-w}p(x\mid c)^w]$ and, since $p(x)=p(x\mid c)p(c)/p(c\mid x)$, $p(x)^{1-w}p(x\mid c)^w\propto p(x\mid c)\,p(c\mid x)^{w-1}$: the conditional distribution reweighted toward states where the implicit classifier is confident. This explains why $w=4$ pushes mode-C samples upward, away from modes A and B, where $p(c\mid x)$ is highest.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 1.4 — For the Flow-GRPO SDE step, (a) show that $\nu\to0$ recovers Euler; (b) write $\log\rho$ between two policies that differ only in $v$; (c) explain why the same construction gives no usable ratio for an ODE policy.</summary><div class="solution">
+<p>(a) With $\nu=0$, $\mu=x_t+h[(1+0)v-0]=x_t+hv$ and $\sigma_{\text{ref}}^2=0$, which is the Euler step.</p>
+<p>(b) Both transitions are $\mathcal N(\mu(s_t,v_\cdot),\sigma_{\text{ref}}^2I)$ with the same variance. For an observed next state $x'$:</p>
+<div class="math-block">\[ \log\rho=\log\frac{\mathcal N(x';\mu_\theta,\sigma^2I)}{\mathcal N(x';\mu_{\text{old}},\sigma^2I)}=\frac{\lVert x'-\mu_{\text{old}}\rVert^2-\lVert x'-\mu_\theta\rVert^2}{2\sigma^2},\qquad \mu_\theta-\mu_{\text{old}}=h\Big(1+\frac{\nu^2}{2}\Big)(v_\theta-v_{\text{old}}). \]</div>
+<p>The normalizers cancel. The ratio depends on the velocity difference scaled by $h(1+\nu^2/2)/\sigma$, so small $\nu$ makes the ratio extremely sensitive to small velocity changes.</p>
+<p>(c) As $\nu\to0$, $\sigma\to0$ and $\log\rho$ diverges for any $v_\theta\neq v_{\text{old}}$; at $\nu=0$ the transitions are Dirac masses and the ratio is $0$ or undefined. DiffusionART therefore rolls out with the ODE and uses an MSE objective; it uses the SDE only as a fixed $\nu=0.8$ reference to measure drift, $m=\lVert\Delta\mu\rVert^2/(2D\sigma_{\text{ref}}^2)$ (the paper, §4.3).</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 1.5 — The repo computes the clean-sample estimate as <code>x - t * v</code> and steps with <code>x + (nxt - t) * v</code>. Show both agree with the paper's formulas, and decide whether adding a data-space direction $G$ to the model output in repo code should use <code>+ G</code> or <code>- G</code>.</summary><div class="solution">
+<p>The SD3 network approximates $v_{\text{SD3}}=\mathbb E[\epsilon-x_0\mid x_t]=-v^*$. Then <code>x - t * v</code> $=x_t+t\,v^*=\hat x_0$ (Exercise 1.2), and <code>x + (nxt - t) * v</code> $=x_t+(t-t_{\text{next}})\,v^*=x_t+\Delta v^*$, the paper's Euler step.</p>
+<p>The paper's target is $v_{\text{tgt}}=v_{\text{old}}+G$ in the paper convention. In the SD3 convention the target becomes $-v_{\text{tgt}}=v_{\text{SD3,old}}-G$. So a repo that regresses raw network outputs must use <code>- G</code> (or negate the outputs first). An MSE such as $\lVert v_\theta-v_{\text{tgt}}\rVert^2$ is invariant to negating both arguments, so the only place the sign matters is how $G$ is added. Keep this in mind when you read <code>src/visual_rl/algorithms/art.py</code> in a later step.</p>
+</div></details>
+
+<div class="takeaways"><p class="callout-title">Takeaways</p><ul>
+  <li>Rectified flow noises with $x_t=(1-t)x_0+t\epsilon$; the per-sample velocity is $u_t=x_0-\epsilon$, pointing toward data as $t$ goes $1\to0$.</li>
+  <li>MSE regression on $u_t$ learns $v^*(x_t,t)=\mathbb E[u_t\mid x_t]$, the ideal forward velocity <em>induced by the endpoint distribution</em>. Reweight the endpoints and the ideal field changes; the paper's §3 analysis rests on this.</li>
+  <li>$\hat x_0=x_t+tv$, $\hat\epsilon=x_t-(1-t)v$, and the score $=-\hat\epsilon/t$ are interchangeable views of the same prediction.</li>
+  <li>Euler ODE sampling is a deterministic map from noise to sample; few steps collapse toward posterior means.</li>
+  <li>The Flow-GRPO SDE has the same marginals, with Gaussian steps $\mathcal N(\mu(s_t,v),\sigma_{\text{ref}}^2I)$. Only SDE steps have log-probs, so likelihood-ratio RL needs SDE rollouts; DiffusionART uses ODE rollouts and the SDE only as a reference for a KL proxy.</li>
+  <li>CFG is $v_{\text{u}}+w(v_{\text{c}}-v_{\text{u}})$, justified by Bayes' rule on scores; distilling it regresses a model onto "current velocity plus an improving direction", the template DiffusionART reuses with a reward direction.</li>
+  <li>Production models work in normalized VAE latents with shifted schedules, and SD3/diffusers predict $\epsilon-x_0$: always check the sign.</li>
+</ul></div>
+
+<div class="reading"><p class="callout-title">Further reading</p><ul>
+  <li>Lipman et al., <a href="https://arxiv.org/abs/2210.02747">Flow Matching for Generative Modeling</a> (2022): conditional flow matching and the marginal-field theorem.</li>
+  <li>Liu, Gong and Liu, <a href="https://arxiv.org/abs/2209.03003">Flow Straight and Fast: Rectified Flow</a> (2022).</li>
+  <li>Esser et al., <a href="https://arxiv.org/abs/2403.03206">Scaling Rectified Flow Transformers for High-Resolution Image Synthesis</a> (SD3, 2024): timestep shifting and the MMDiT architecture.</li>
+  <li>Ho and Salimans, <a href="https://arxiv.org/abs/2207.12598">Classifier-Free Diffusion Guidance</a> (2022).</li>
+  <li>Song et al., <a href="https://arxiv.org/abs/2011.13456">Score-Based Generative Modeling through SDEs</a> (2021): the probability-flow ODE and reverse SDE family.</li>
+  <li>Liu et al., <a href="https://arxiv.org/abs/2505.05470">Flow-GRPO</a> (2025): the ODE-to-SDE conversion used in the paper's Appendix C.2.</li>
+  <li>The paper, §2 (Preliminaries), §3.1 (ideal forward velocity), §4.3 and Appendix C.2 (SDE reference transitions); the repo's <code>src/visual_rl/sampling.py</code>.</li>
+</ul></div>
+</section>

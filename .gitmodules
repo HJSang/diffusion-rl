@@ -1,0 +1,3 @@
+[submodule "code/DiffusionART"]
+	path = code/DiffusionART
+	url = https://github.com/vanzll/DiffusionART

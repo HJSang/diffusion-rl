@@ -1,0 +1,4 @@
+rewards    [-5.02 -0.07 -1.72 -2.18 -4.35 -6.45 -1.02 -7.62]
+advantages [-0.54  1.28  0.68  0.51 -0.29 -1.07  0.93 -1.5 ]
+update 0: loss=+0.0000  ratio in [1.000, 1.000]  clip_frac=0.000
+update 1: loss=-0.0229  ratio in [0.577, 1.820]  clip_frac=0.188

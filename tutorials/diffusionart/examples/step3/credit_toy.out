@@ -1,0 +1,5 @@
+ D    N   cos(per-step push, w)   cos(endpoint covariance, w)
+  16    1   0.554                   0.554
+  16   10   0.198                   0.555
+1024    1   0.080                   0.080
+1024   10   0.025                   0.080

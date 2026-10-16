@@ -1,0 +1,5 @@
+extends: /Users/hejian.sang/Downloads/DiffusionART-paper/DiffusionART/configs/examples/cpu_smoke.yaml
+name: cpu-smoke-diffusionnft
+algorithm: diffusionnft
+runtime:
+  output_dir: /Users/hejian.sang/Downloads/DiffusionART-paper/tutorial/scratch/step5/runs/cpu-diffusionnft

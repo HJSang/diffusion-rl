@@ -1,0 +1,66 @@
+<section class="closing" id="closing">
+  <p class="eyebrow">After step 5</p>
+  <h2>Putting it together</h2>
+  <p class="lede">The whole method fits on one screen once the pieces are in place. Use this section as a review sheet and a self-test.</p>
+
+  <h3 id="s9-chain">The argument in eight sentences</h3>
+  <ol>
+    <li>A rectified-flow model generates by integrating a learned velocity field from noise ($t=1$) to data ($t=0$), and it is trained by regressing the per-sample target $u_t=x_0-\epsilon$.</li>
+    <li>RL fine-tuning treats each sampler step as an action and scores only the final sample, so one scalar must be spread over many steps.</li>
+    <li>Reverse-process RL (Flow-GRPO) turns the ODE into an SDE to get step likelihoods, then pushes each step along its own sampled noise, scaled by a trajectory-level advantage. That is noisy credit assignment.</li>
+    <li>Forward-process RL (DiffusionNFT) re-noises endpoints and regresses velocities toward reward-weighted targets. It needs no likelihoods and learns fast, but each branch alone collapses and the joint version needs a tuned EMA.</li>
+    <li>The reason: NFT's targets assume the model's sampling velocity equals the ideal forward velocity of its own endpoints. The gap between the two adds a force unrelated to reward that the two branches only partly cancel.</li>
+    <li>EMA helps because the lagged model pulls the trainable one back (restoration), not because the data is off-policy.</li>
+    <li>DiffusionART instead aggregates each prompt's $K$ endpoints and rewards into one direction, $G(c)\propto\operatorname{Cov}(R,x_0)$, which is the first-order effect of tilting $p_{\text{old}}$ by $e^{\tau R}$, and adds it to the cached velocity at every visited state. No forward velocity appears, so the consistency force is gone by construction.</li>
+    <li>Two disjoint MSE updates toward the same frozen target make the second update contain a restoration term $-d(s_t)$ proportional to each state's drift, and a KL-proxy mask stops outward drift beyond a threshold.</li>
+  </ol>
+
+  <h3 id="s9-side">GRPO for LLMs next to DiffusionART</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Stage</th><th>GRPO in an LLM trainer</th><th>DiffusionART</th></tr></thead>
+    <tbody>
+      <tr><td>Rollout</td><td>Sample $K$ responses per prompt; keep token logprobs.</td><td>Sample $K$ endpoints per prompt with an ODE solver; keep states $s_t$ and cached velocities $v_\theta^{(0)}(s_t)$.</td></tr>
+      <tr><td>Reward</td><td>Verifier or reward model on the response.</td><td>Image or video reward model on the decoded endpoint (scalar or pairwise label).</td></tr>
+      <tr><td>Credit signal</td><td>Scalar advantage $A_i=(R_i-\bar R)/\mathrm{std}$, shared by all tokens of response $i$.</td><td>Vector direction $G(c)$ in latent space, shared by all states of all $K$ samples of prompt $c$.</td></tr>
+      <tr><td>Loss</td><td>Clipped ratio $\min(\rho A,\operatorname{clip}(\rho)A)$ per token.</td><td>$w(s_t)\operatorname{MSE}\big(v_\theta(s_t),\,v_\theta^{(0)}(s_t)+G(c)\big)$ per state.</td></tr>
+      <tr><td>Trust region</td><td>Ratio clipping.</td><td>Mask states whose KL proxy $m(s_t)\ge\delta$ and whose update points outward.</td></tr>
+      <tr><td>Staying close</td><td>KL to a reference, clipping, a few epochs.</td><td>Second disjoint update adds restoration $-d(s_t)$; no EMA, no reference KL.</td></tr>
+    </tbody>
+  </table></div>
+
+  <figure class="code">
+    <figcaption><span class="tag">pseudocode · paper Algorithm 1</span> one DiffusionART iteration</figcaption>
+    <pre><code class="language-python"># Rollout stage
+for c in prompts:
+    traj = ode_sample(v_theta, c, K)            # K endpoints, visited states s_t, cached v0(s_t)
+    R = reward(decode(traj.x0), c)              # shape [K]; pairwise: labels in {1, 0, 0.5}
+    cov = ((R - R.mean())[:, None] * (traj.x0 - traj.x0.mean(0))).mean(0)
+    G = cov / cov.pow(2).mean().sqrt()          # RMS-normalized guidance G(c)
+    for s in traj.states:
+        s.target = s.v0 + G                     # frozen target, never recomputed
+
+# Training stage: two disjoint halves, one optimizer step each
+for B in split_in_half(all_states):
+    d = v_theta(B) - B.v0                       # drift since rollout
+    m = kl_proxy(d, B.t)                        # ||mu(v) - mu(v0)||^2 / (2 D sigma_ref^2)
+    outward = ((d * (B.G - d)).sum(-1) &gt; 0)
+    w = B.t * (1 - ((m &gt;= 1e-5) &amp; outward).float())
+    loss = (w * ((v_theta(B) - B.target) ** 2).mean(-1)).mean()
+    loss.backward(); opt.step(); opt.zero_grad()</code></pre>
+  </figure>
+
+  <h3 id="s9-check">Self-test</h3>
+  <p>You are ready to work on this area when you can answer these without notes.</p>
+  <details class="exercise"><summary>Why can DiffusionART sample with a deterministic ODE when Flow-GRPO cannot?</summary><div class="solution"><p>Flow-GRPO's objective is a likelihood ratio of sampler steps, and a deterministic step has no density, so it must inject noise (SDE). DiffusionART's loss is a velocity regression toward a frozen target, which needs no step likelihood. It borrows the SDE only as a reference to measure drift in the trust-region mask, and the rollout itself stays an ODE.</p></div></details>
+  <details class="exercise"><summary>What does $G(c)$ become when all $K$ rewards for a prompt are equal, and what does the update do then?</summary><div class="solution"><p>The covariance is zero, so there is no reward signal for that prompt. Step 5 traces how the code guards the RMS normalization in this case. With a zero guidance the target equals the cached velocity, so the first update has zero loss on those states and the second update only restores drift toward $v_\theta^{(0)}$.</p></div></details>
+  <details class="exercise"><summary>Why does the second update restore, while the first does not?</summary><div class="solution"><p>Before the first update $v_\theta=v_\theta^{(0)}$, so the residual to the target is exactly $G(c)$. After it, the model has moved by $d(s_t)$ and the residual is $G(c)-d(s_t)$; the $-d(s_t)$ part pulls each state back in proportion to how far it drifted, which is the restoration force EMA provided in NFT.</p></div></details>
+  <details class="exercise"><summary>In one sentence, what is the forward–reverse consistency force?</summary><div class="solution"><p>It is the part of NFT's update that moves the model's sampling velocity toward (positive branch) or away from (negative branch) the ideal forward velocity induced by its own endpoints. That gap has nothing to do with reward, and centered rewards cancel it across samples but not at each state.</p></div></details>
+  <details class="exercise"><summary>Name two settings where you would expect DiffusionART's advantage to shrink, and why.</summary><div class="solution"><p>Examples: (1) rewards whose improvement direction differs strongly between noise levels or between regions of a prompt's sample space, because one shared $G(c)$ per prompt is a first-order, mean-shift signal; (2) very small $K$ with scalar rewards, where the covariance estimate is noisy (the paper's pairwise results with $K=2$ are the counterpoint to test). Step 4's critical-reading section lists more.</p></div></details>
+
+  <h3 id="s9-next">Where to go next</h3>
+  <ul>
+    <li>Reproduce one image recipe end to end (Step 5), then change one thing at a time: $K$, the second update, scalar versus pairwise rewards.</li>
+    <li>Read the papers DiffusionART builds on for the tilt view: Tilt Matching (Potaptchik et al.) and CRD (Zhu et al.), cited in §4.1 of the paper, and Flow-DPPO for the masking rule.</li>
+    <li>If you maintain an LLM RL framework, the porting notes at the end of Step 5 list what a diffusion integration needs. DiffusionART is the easiest algorithm to port because it needs no step log-probabilities.</li>
+  </ul>
+</section>

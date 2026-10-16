@@ -1,0 +1,11 @@
+x=(0.5,0.5), t=0.5:  v_uncond [[-0.355  1.961]]  v_cond [[-0.782  2.782]]
+   w=1.0: v_cfg [[-0.782  2.782]]
+   w=3.0: v_cfg [[-1.635  4.423]]
+CFG w=0.0: frac in cond mode 0.199  mean [-0.004  1.963]  std [0.342 0.346]
+CFG w=1.0: frac in cond mode 1.000  mean [0.004 1.999]  std [0.337 0.337]
+CFG w=2.0: frac in cond mode 1.000  mean [0.04  2.361]  std [0.272 0.236]
+CFG w=4.0: frac in cond mode 1.000  mean [0.08  2.747]  std [0.243 0.191]
+closed form v*: 1.4
+Monte Carlo   : 1.3967467546463013  ( 38187 samples )
+uniform: [1.  0.9 0.8 0.7 0.6 0.5 0.4 0.3 0.2 0.1 0. ]
+shift=3: [1.    0.964 0.923 0.875 0.818 0.75  0.667 0.562 0.429 0.25  0.   ]

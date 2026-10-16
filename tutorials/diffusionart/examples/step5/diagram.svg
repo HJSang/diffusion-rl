@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="790" height="790" viewBox="0 0 790 680" role="img" aria-label="Data flow of one DiffusionART training iteration through the repository's functions">
+    <defs>
+      <marker id="s5-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:#667085"/>
+      </marker>
+    </defs>
+    <g style="font-family:inherit">
+      <rect x="40" y="16" width="680" height="54" rx="8" style="fill:#f6f7f9;stroke:#667085;stroke-width:1.5"/>
+      <text x="56" y="38" style="fill:#1d2433;font-size:14px;font-weight:600">1 · Config and backend</text>
+      <text x="56" y="58" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">train.main → load_config() → registry.get_backend() → backend.run(config)</text>
+
+      <rect x="40" y="96" width="680" height="54" rx="8" style="fill:#f6f7f9;stroke:#667085;stroke-width:1.5"/>
+      <text x="56" y="118" style="fill:#1d2433;font-size:14px;font-weight:600">2 · Prompts for this rollout (P global, P/world per rank)</text>
+      <text x="56" y="138" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">stream.take(P) · groups = arange(P).repeat_interleave(K) · cached text conditioning</text>
+
+      <rect x="40" y="176" width="680" height="64" rx="8" style="fill:#f6f7f9;stroke:#0f8b8d;stroke-width:2"/>
+      <text x="56" y="198" style="fill:#1d2433;font-size:14px;font-weight:600">3 · ODE rollout with the current weights = θ_old (no grad)</text>
+      <text x="56" y="217" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">collect_rollout(predict, noise, sigmas, selected=…): Euler x + dt·v per step</text>
+      <text x="56" y="233" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">caches states[N,S,…], old_velocities[N,S,…], endpoints[N,…] as fp32 on CPU</text>
+
+      <rect x="40" y="266" width="680" height="54" rx="8" style="fill:#f6f7f9;stroke:#0f8b8d;stroke-width:2"/>
+      <text x="56" y="288" style="fill:#1d2433;font-size:14px;font-weight:600">4 · Decode endpoints and score them</text>
+      <text x="56" y="308" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">decode_and_score_images() / score_videos() → scores.weighted [N]</text>
+
+      <rect x="40" y="346" width="680" height="54" rx="8" style="fill:#f6f7f9;stroke:#d55e00;stroke-width:2"/>
+      <text x="56" y="368" style="fill:#1d2433;font-size:14px;font-weight:600">5 · Covariance guidance per prompt group: G(c)</text>
+      <text x="56" y="388" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">art_scalar_covariance() | art_pairwise_covariance() → group_directions</text>
+
+      <rect x="40" y="426" width="680" height="54" rx="8" style="fill:#f6f7f9;stroke:#d55e00;stroke-width:2"/>
+      <text x="56" y="448" style="fill:#1d2433;font-size:14px;font-weight:600">6 · Freeze targets and split into two disjoint windows</text>
+      <text x="56" y="468" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">ARTObjective(cache, predict, directions, magnitudes, anchors) · disjoint_windows()</text>
+
+      <rect x="40" y="506" width="330" height="70" rx="8" style="fill:#f6f7f9;stroke:#d55e00;stroke-width:2"/>
+      <text x="56" y="528" style="fill:#1d2433;font-size:14px;font-weight:600">7a · Update 1 on window B₁</text>
+      <text x="56" y="547" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">accumulated_step(window 1)</text>
+      <text x="56" y="565" style="fill:#667085;font-size:12px">force ∝ t·G(c); mask inactive (d = 0)</text>
+
+      <rect x="390" y="506" width="330" height="70" rx="8" style="fill:#f6f7f9;stroke:#d55e00;stroke-width:2"/>
+      <text x="406" y="528" style="fill:#1d2433;font-size:14px;font-weight:600">7b · Update 2 on window B₂</text>
+      <text x="406" y="547" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">accumulated_step(window 2)</text>
+      <text x="406" y="565" style="fill:#667085;font-size:12px">force ∝ t·(G − d); trust-region mask</text>
+
+      <rect x="40" y="602" width="680" height="54" rx="8" style="fill:#f6f7f9;stroke:#667085;stroke-width:1.5"/>
+      <text x="56" y="624" style="fill:#1d2433;font-size:14px;font-weight:600">8 · Log, evaluate, checkpoint</text>
+      <text x="56" y="644" style="fill:#667085;font-size:12px;font-family:ui-monospace,monospace">metrics.jsonl (→ wandb_export) · evaluate() every N · save_checkpoint()</text>
+    </g>
+    <g style="stroke:#667085;stroke-width:1.5;fill:none">
+      <line x1="380" y1="70" x2="380" y2="94" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="150" x2="380" y2="174" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="240" x2="380" y2="264" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="320" x2="380" y2="344" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="400" x2="380" y2="424" marker-end="url(#s5-arrow)"/>
+      <line x1="300" y1="480" x2="205" y2="504" marker-end="url(#s5-arrow)"/>
+      <line x1="460" y1="480" x2="555" y2="504" marker-end="url(#s5-arrow)"/>
+      <line x1="370" y1="541" x2="388" y2="541" marker-end="url(#s5-arrow)"/>
+      <line x1="555" y1="576" x2="555" y2="600" marker-end="url(#s5-arrow)"/>
+      <path d="M720,629 L760,629 L760,208 L722,208" marker-end="url(#s5-arrow)"/>
+    </g>
+    <text x="772" y="420" transform="rotate(-90 772 420)" style="fill:#667085;font-size:12px;text-anchor:middle">next rollout: θ_old ← θ (no EMA)</text>
+    <text x="380" y="499" style="fill:#667085;font-size:11px;text-anchor:middle">same frozen targets</text>
+  </svg>

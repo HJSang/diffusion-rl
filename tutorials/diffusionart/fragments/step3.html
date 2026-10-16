@@ -1,0 +1,760 @@
+<section class="step" id="step-3" data-title="The baselines">
+<header class="step-head">
+  <p class="eyebrow">Step 3 · 1–2 days</p>
+  <h2>The baselines: DDPO, Flow-GRPO, DiffusionNFT, ReFL and Diffusion-DPO</h2>
+  <p class="lede">After this step you can write down the objective of every method DiffusionART is compared against, run one training iteration of each in your head, derive DiffusionNFT's single-target form from scratch, and name the exact weakness of each method that DiffusionART is designed to fix.</p>
+</header>
+
+<h3 id="s3-map">A map of the design space</h3>
+
+<p>Step 2 ended with a split. <em>Reverse-process</em> methods train on the states that the sampler actually visits while it denoises from $t=1$ to $t=0$. <em>Forward-process</em> methods take the finished clean samples (endpoints), noise them again with the forward process $x_t=\alpha_t x_0+\sigma_t\epsilon$, and train on those re-noised states. Every baseline in this chapter sits somewhere on two axes:</p>
+
+<ul>
+  <li><strong>What feedback it consumes.</strong> A scalar black-box reward on the endpoint (DDPO, Flow-GRPO, DiffusionNFT), the gradient of a differentiable reward model (ReFL), or a fixed dataset of preference pairs (Diffusion-DPO).</li>
+  <li><strong>Where the update lands.</strong> On sampled reverse transitions through a likelihood ratio (DDPO, Flow-GRPO), or on forward-noised states through a regression target (DiffusionNFT, Diffusion-DPO), or on the final denoising step through the chain rule (ReFL).</li>
+</ul>
+
+<p>The paper's introduction frames its own contribution in exactly these terms. Online RL "evaluates clean samples from the evolving generator and can use black-box rewards", unlike ReFL (needs reward gradients) and Diffusion-DPO (offline). Inside online RL, reverse-process methods are stable but credit-inefficient, and forward-process methods are efficient but need two stabilizers whose strength must be tuned per task. Keep that sentence in mind; each section below fills in one half of it.</p>
+
+<p>Throughout, $c$ is the prompt, $K$ is the number of samples per prompt, $R_i=R(x_0^{(i)},c)$ is the raw reward of endpoint $i$, $\bar R_c$ is the prompt's mean reward, $u_t=x_0-\epsilon$ is the rectified-flow velocity target, $v_\theta$ is the trainable velocity and $v_{\text{old}}=v_{\theta_{\text{old}}}$ is the rollout policy's velocity. The repository code uses the SD3 sign convention (predicts $\epsilon-x_0=-u_t$ and integrates with <code>x + (t_next - t) * v</code>); every code block below says how it maps back.</p>
+
+<h3 id="s3-ddpo">DDPO: denoising as a multi-step MDP</h3>
+
+<h4>Motivation</h4>
+<p>Before 2023, the standard way to make a diffusion model produce "better" images was supervised: filter or reweight a dataset by a reward, then fine-tune on it (reward-weighted regression). Black et al. (DDPO, 2023) asked the RL question directly: if the reward is only a black-box function of the final image, such as JPEG compressibility, an aesthetic predictor or a VLM's judgment of prompt alignment, how do you compute a policy gradient for a diffusion sampler? Their answer, which every reverse-process method since inherits, is to stop treating the sampler as one big generative model and to treat each denoising step as an action.</p>
+
+<h4>The objective and its gradient</h4>
+<p>DDPO uses a stochastic DDPM/DDIM sampler, so each step is a Gaussian transition with a mean predicted by the network and a fixed, schedule-determined variance:</p>
+<div class="math-block">\[ p_\theta(x_{k-1}\mid x_k,c)=\mathcal N\!\big(x_{k-1};\ \mu_\theta(x_k,k,c),\ \sigma_k^2 I\big),\qquad k=T,\dots,1. \]</div>
+<p>The MDP has state $s_k=(c,k,x_k)$, action $a_k=x_{k-1}$, deterministic "environment" (the next state is the action), zero reward until the end, and terminal reward $R(x_0,c)$. The objective is $\mathcal J(\theta)=\mathbb E_{c}\,\mathbb E_{x_{T:0}\sim p_\theta}[R(x_0,c)]$. Because $x_T\sim\mathcal N(0,I)$ does not depend on $\theta$, the trajectory log-density is a sum of step log-densities plus a constant, and the score-function identity gives</p>
+<div class="math-block">\[ \nabla_\theta\mathcal J=\mathbb E\Big[R(x_0,c)\sum_{k=1}^{T}\nabla_\theta\log p_\theta(x_{k-1}\mid x_k,c)\Big]. \]</div>
+<p>This is DDPO<sub>SF</sub> (score function): plain REINFORCE, valid only on-policy, one gradient step per batch of samples. DDPO<sub>IS</sub> reuses each batch for several steps by importance sampling each transition with the ratio $\rho_k=p_\theta(x_{k-1}\mid x_k,c)/p_{\text{old}}(x_{k-1}\mid x_k,c)$ and PPO-style clipping. DDPO also normalizes rewards per prompt (subtract the prompt's running mean, divide by its standard deviation), which is the ancestor of GRPO's group normalization.</p>
+
+<h4>One iteration</h4>
+<ol>
+  <li>Sample a batch of prompts; for each, run the full stochastic sampler (the DDPO paper used 50 DDIM steps with $\eta=1$, so every step is stochastic) and store every $(x_k,x_{k-1},\log p_{\text{old}})$.</li>
+  <li>Score each endpoint with the reward; normalize per prompt to get an advantage $A_i$.</li>
+  <li>For a few inner epochs, recompute $\log p_\theta$ of every stored transition, form $\rho_k$, and maximize $\min(\rho_kA_i,\operatorname{clip}(\rho_k,1-\epsilon,1+\epsilon)A_i)$ summed over all $T$ steps.</li>
+</ol>
+
+<h4>Hyperparameters that matter, strengths, failure modes</h4>
+<p>The knobs are the number of sampler steps (cost is linear in it, since each step is a forward pass at rollout and a forward-backward pass at training), the clip range (DDPO used a very small one, on the order of $10^{-4}$, for the dimension-scaling reason you met in Step 2), and the number of inner epochs. Its strength is generality: any reward, no differentiability, a clean MDP. Its weaknesses are cost (every step is trained), variance (one trajectory-level scalar multiplies $T$ high-dimensional score vectors), and reward over-optimization with no explicit regularizer.</p>
+
+<p><strong>DPOK</strong> (Fan et al., 2023, contemporaneous with DDPO and not in the paper's bibliography) uses the same MDP but adds KL regularization to the pretrained model. The KL between two diffusion trajectories' endpoint distributions is intractable, so DPOK upper-bounds it by the sum of per-step KLs between Gaussian transitions, each of which is closed-form ($\lVert\mu_\theta-\mu_{\text{ref}}\rVert^2/2\sigma_k^2$). Flow-GRPO's KL term below is the same construction.</p>
+
+<div class="callout llm"><p class="callout-title">In LLM terms</p>
+<p>DDPO is PPO with a terminal outcome reward and no value function, where each "token" is one denoising step and the "vocabulary" is $\mathbb R^D$. Two things differ. The horizon is fixed (always $T$ steps), so there is no length bias. And each action is a continuous Gaussian vector of dimension $D\approx10^5$, so its log-probability is a sum of $D$ terms; that is why the clip range is $10^{-4}$, not $0.2$.</p></div>
+
+<h3 id="s3-flowgrpo">Flow-GRPO: GRPO on a flow model's SDE</h3>
+
+<h4>Motivation: a flow model has no transition density</h4>
+<p>Modern image and video generators (SD3, FLUX, HunyuanVideo, Wan) are rectified-flow models sampled with a deterministic ODE: $x_{t-\Delta}=x_t+\Delta\,v_\theta(x_t,t,c)$. A deterministic step has no density, so $\log p_\theta(x_{t-\Delta}\mid x_t)$ is undefined and DDPO cannot be applied. Flow-GRPO (Liu et al., 2025) fixes this in two moves: replace the ODE by an SDE with the same marginals, and replace DDPO's running per-prompt statistics with GRPO's group normalization over $K$ samples of the same prompt.</p>
+
+<h4>ODE to SDE, derived</h4>
+<p>Step 1 showed that for rectified flow the ideal velocity is $v(x_t)=\mathbb E[x_0-\epsilon\mid x_t]$. Since $x_t=(1-t)\mathbb E[x_0\mid x_t]+t\,\mathbb E[\epsilon\mid x_t]$, eliminate $\mathbb E[x_0\mid x_t]$:</p>
+<div class="math-block">\[ v=\frac{x_t-t\hat\epsilon}{1-t}-\hat\epsilon=\frac{x_t-\hat\epsilon}{1-t}\ \Rightarrow\ \hat\epsilon:=\mathbb E[\epsilon\mid x_t]=x_t-(1-t)v,\qquad \nabla\log p_t(x_t)=-\frac{\hat\epsilon}{t}=-\frac{x_t-(1-t)v}{t}. \]</div>
+<p>Moving backward in time with step $h&gt;0$, the ODE drift is $v$. Adding Gaussian noise of scale $\sigma_t\sqrt h$ would spread the distribution, so the drift must gain a Langevin correction $\tfrac{\sigma_t^2}{2}\nabla\log p_t$ that pulls it back; the resulting family keeps every marginal $p_t$ unchanged for any choice of $\sigma_t$. Substituting the score and Flow-GRPO's choice $\sigma_t^2=\nu^2 t/(1-t)$ (so $\sigma_t^2/2t=\nu^2/2(1-t)$ and $\sigma_t^2(1-t)/2t=\nu^2/2$) gives exactly the reference transition the paper writes in its appendix:</p>
+<div class="math-block">\[ x_{t-h}\sim\mathcal N\big(\mu(s_t,v),\ \sigma_{\text{ref}}^2(t)I\big),\quad \mu(s_t,v)=x_t+h\Big[\big(1+\tfrac{\nu^2}{2}\big)v-\frac{\nu^2}{2(1-t)}x_t\Big],\quad \sigma_{\text{ref}}^2(t)=\nu^2\frac{t}{1-t}h. \]</div>
+<p>$\nu$ is the noise level (0.7 to 0.8 in practice). The term $\nu^2 t/(1-t)$ blows up at $t=1$, so implementations replace $t$ in the denominator by the next grid time on the first step. Now each step has a Gaussian log-density, and the velocity network enters only through the mean.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/sampling.py · L94–125</span> Flow-GRPO SDE, DanceGRPO SDE and CPS transitions with their log-probabilities. SD3 convention: <code>v</code> $=-v_\theta$ and <code>dt</code> $=t_{\text{next}}-t=-h&lt;0$; substituting both turns the <code>sde</code> branch into $\mu(s_t,v)$ above. Note the last line: the log-density is a <em>mean</em> over latent elements, not a sum.</figcaption>
+<pre><code class="language-python">    if kind == "sde":
+        if (t == 1).any():
+            if sigma_max is None or not math.isfinite(sigma_max) or not 0 &lt; sigma_max &lt; 1:
+                raise ValueError("t=1 requires the actual schedule's next sigma as sigma_max")
+        guard = t if sigma_max is None else torch.where(t == 1, float(sigma_max), t)
+        diffusion = torch.sqrt(t / (1 - guard)) * noise_level
+        mean = x * (1 + diffusion.square() * dt / (2 * t))
+        mean = mean + v * (1 + diffusion.square() * (1 - t) / (2 * t)) * dt
+        std = diffusion * (-dt).sqrt()
+    elif kind == "dance":
+        if likelihood != "gaussian":
+            raise ValueError("Dance uses Gaussian transition likelihoods")
+        # DanceGRPO 15cc71d, train_grpo_flux_lora.py::flux_step.
+        endpoint = x - t * v
+        score = -(x - endpoint * (1 - t)) / t.square()
+        mean = x + dt * v + (-0.5 * noise_level**2 * score) * dt
+        std = noise_level * (-dt).sqrt()
+    else:
+        std = nxt * math.sin(noise_level * math.pi / 2)
+        x0, x1 = x - t * v, x + (1 - t) * v
+        mean = x0 * (1 - nxt) + x1 * (nxt.square() - std.square()).clamp_min(0).sqrt()
+    if not (std &gt; 0).all():
+        raise ValueError("zero-variance transition has no stochastic likelihood")
+    supplied = innovation if innovation is not None else observed
+    if supplied.shape != x.shape or not torch.isfinite(supplied).all():
+        raise ValueError("noise/observed state must be finite and match state shape")
+    sample = mean + std * innovation.to(x) if innovation is not None else observed.to(x)
+    delta = sample.detach() - mean
+    logp = -delta.square()
+    if likelihood == "gaussian":
+        logp = logp / (2 * std.square()) - std.log() - math.log(2 * math.pi) / 2
+    return Transition(sample, mean, std, logp.flatten(1).mean(1))</code></pre>
+</figure>
+
+<h4>The objective</h4>
+<p>The paper's appendix ("Reverse-Process Policy Optimization") writes Flow-GRPO as follows. For reverse trajectories $x^{(i)}_{T:0}\sim P^{\text{rev}}_{\text{old}}(\cdot\mid c)$, $i=1,\dots,K$, compute the group-normalized terminal advantage $A_i=(R_i-\bar R_c)/\operatorname{std}(R)$ and assign it to every transition $k$ of trajectory $i$. Then maximize</p>
+<div class="math-block">\[ \mathcal J_{\text{FG}}=\mathbb E_{i,k}\Big[\min\!\big(\rho_{i,k}A_i,\ \operatorname{clip}(\rho_{i,k},1-\epsilon_{\text{clip}},1+\epsilon_{\text{clip}})A_i\big)-\lambda_{\text{KL}}D_{\text{KL}}\big(p_\theta(\cdot\mid x_k^{(i)},c)\,\Vert\,p_{\text{ref}}(\cdot\mid x_k^{(i)},c)\big)\Big], \]</div>
+<div class="math-block">\[ \rho_{i,k}=\frac{p_\theta(x^{(i)}_{k-1}\mid x^{(i)}_k,c)}{p_{\text{old}}(x^{(i)}_{k-1}\mid x^{(i)}_k,c)}. \]</div>
+<p>$\epsilon_{\text{clip}}&gt;0$ is the clip radius, $\lambda_{\text{KL}}\ge0$ weights the penalty and $p_{\text{ref}}$ is a frozen reference transition (usually the pretrained model). Because both transitions share the variance $\sigma_{\text{ref}}^2$, the KL is closed-form: $\lVert\mu_\theta-\mu_{\text{ref}}\rVert^2/2\sigma_{\text{ref}}^2$. The DiffusionART experiments set $\lambda_{\text{KL}}=0$ for every method, so in the comparisons the only trust region is the clip.</p>
+
+<h4>One iteration, step by step</h4>
+<ol>
+  <li><strong>Rollout.</strong> For each prompt draw $K$ trajectories with the SDE sampler under $\theta_{\text{old}}$ (frozen weights; in practice the current weights before the first update). Store, for every trained step, the state $x_k$, the sampled next state $x_{k-1}$, and $\log p_{\text{old}}$.</li>
+  <li><strong>Reward.</strong> Decode endpoints, score them, and normalize within each prompt group. The repository's image path centers per prompt but divides by the standard deviation of the whole rollout batch (plus $10^{-4}$), in FP64.</li>
+  <li><strong>Replay.</strong> For each stored transition recompute the mean with the current $v_\theta$ and evaluate the log-density of the <em>same stored</em> $x_{k-1}$. This is the "replay" step; you never resample.</li>
+  <li><strong>Loss.</strong> Clipped surrogate per transition, averaged over a fixed denominator, one or more optimizer steps per rollout (the repo's paper configs use two disjoint windows per rollout).</li>
+</ol>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/policy.py · L33–46</span> The repo's clipped surrogate, written as a loss to minimize: $\max(-A\rho,\,-A\operatorname{clip}(\rho))=-\min(A\rho,\,A\operatorname{clip}(\rho))$. Advantages are clipped to $\pm5$ first.</figcaption>
+<pre><code class="language-python">    delta = _log_ratio(log_prob, old_log_prob)
+    clip = scalar(ratio_clip, "ratio_clip")
+    if clip &gt;= 1:
+        raise ValueError("ratio_clip must be less than one")
+    if advantage_clip is not None:
+        scalar(advantage_clip, "advantage_clip", positive=True)
+    ratio = delta.exp()
+    clipped = ratio.clamp(1 - clip, 1 + clip)
+
+    def term(values):
+        advantage = vector(values, ratio, "advantages").to(ratio)
+        if advantage_clip is not None:
+            advantage = advantage.clamp(-advantage_clip, advantage_clip)
+        return torch.maximum(-advantage * ratio, -advantage * clipped)</code></pre>
+</figure>
+
+<p>Here is the whole loop at toy scale: a 2D velocity MLP, $K=8$ SDE trajectories of six steps, a reward that prefers endpoints near a target point, group-normalized advantages, and two clipped updates on the same rollout.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Flow-GRPO in 50 lines: SDE rollout with stored log-probs, terminal reward, group advantage broadcast to every transition, PPO-clip. Paper convention ($v$ points toward data).</figcaption>
+<pre><code class="language-python">import torch
+
+torch.manual_seed(0)
+D, K, N, NU, CLIP = 2, 8, 6, 0.7, 0.2
+times = torch.linspace(1.0, 0.0, N + 1)
+target = torch.tensor([2.0, -1.0])                       # reward: be close to this point
+net = torch.nn.Sequential(torch.nn.Linear(D + 1, 64), torch.nn.SiLU(), torch.nn.Linear(64, D))
+opt = torch.optim.Adam(net.parameters(), lr=1e-2)
+
+def velocity(x, t):
+    return net(torch.cat([x, t.expand(len(x), 1)], dim=1))
+
+def sde_mean_std(x, v, t, t_next):
+    h = t - t_next
+    t_eff = torch.where(t &gt;= 1, t_next, t)                # same t=1 guard idea as the repo
+    s2 = NU**2 * t / (1 - t_eff)                          # sigma_t^2 = nu^2 t / (1 - t)
+    mean = x + h * (v * (1 + s2 * (1 - t) / (2 * t)) - s2 / (2 * t) * x)
+    return mean, (s2 * h).sqrt()
+
+def log_prob(x_next, mean, std):                          # Gaussian log density, summed over D
+    return (-(x_next - mean) ** 2 / (2 * std**2) - std.log() - 0.5 * torch.log(torch.tensor(2 * torch.pi))).sum(1)
+
+# ---- rollout with the frozen old policy: store (x_k, x_{k-1}, old log-prob) ----
+states, nexts, old_lp = [], [], []
+with torch.no_grad():
+    x = torch.randn(K, D)
+    for k in range(N):
+        t, tn = times[k], times[k + 1]
+        mean, std = sde_mean_std(x, velocity(x, t.view(1, 1)), t, tn)
+        x_next = mean + std * torch.randn_like(x)
+        states.append(x); nexts.append(x_next); old_lp.append(log_prob(x_next, mean, std))
+        x = x_next
+R = -((x - target) ** 2).sum(1)                           # terminal reward only
+A = (R - R.mean()) / (R.std() + 1e-4)                     # group-normalized advantage
+print("rewards   ", R.numpy().round(2))
+print("advantages", A.numpy().round(2))
+
+# ---- two optimizer steps on the same rollout; every transition gets its trajectory's A ----
+for update in range(2):
+    loss, ratios = 0.0, []
+    for k in range(N):
+        t, tn = times[k], times[k + 1]
+        mean, std = sde_mean_std(states[k], velocity(states[k], t.view(1, 1)), t, tn)
+        ratio = (log_prob(nexts[k], mean, std) - old_lp[k]).exp()
+        surrogate = torch.minimum(ratio * A, ratio.clamp(1 - CLIP, 1 + CLIP) * A)
+        loss = loss - surrogate.mean() / N
+        ratios.append(ratio.detach())
+    opt.zero_grad(); loss.backward(); opt.step()
+    ratios = torch.stack(ratios)
+    print(f"update {update}: loss={loss.item():+.4f}  ratio in [{ratios.min():.3f}, {ratios.max():.3f}]"
+          f"  clip_frac={((ratios - 1).abs() &gt; CLIP).float().mean():.3f}")</code></pre>
+<pre><code class="language-text">rewards    [-5.02 -0.07 -1.72 -2.18 -4.35 -6.45 -1.02 -7.62]
+advantages [-0.54  1.28  0.68  0.51 -0.29 -1.07  0.93 -1.5 ]
+update 0: loss=+0.0000  ratio in [1.000, 1.000]  clip_frac=0.000
+update 1: loss=-0.0229  ratio in [0.577, 1.820]  clip_frac=0.188</code></pre>
+</figure>
+
+<p>Two things in that output are worth a second look. The first update's loss value is exactly zero: every ratio is 1 and the advantages sum to zero within the group, yet the gradient is not zero (it is $\sum_i A_i\nabla\log p_\theta$). Do not monitor this loss as a progress signal. And a single Adam step at learning rate $10^{-2}$ already pushes some ratios to 0.58 and 1.82, so 19% of transitions are clipped on the second update. In real models the per-step log-probability sums over $\sim10^5$ dimensions, which is why the repo instead averages over latent elements and uses <code>ratio_clip: 1e-5</code> (SD3 Flow-GRPO, Fast and image Dance) or <code>1e-4</code> (video DanceGRPO).</p>
+
+<h4>Hyperparameters that matter</h4>
+<ul>
+  <li><strong>Noise level $\nu$</strong>: too small and $\sigma_{\text{ref}}\to0$ makes ratios explode and exploration vanish; too large and the SDE samples degrade. The repo's configs use 0.7 (FLUX Flow-DPPO) and 0.8 (SD3, video).</li>
+  <li><strong>Group size $K$ and prompts per rollout</strong>: the SD3 GenEval configs use 48 prompts × 24 samples; the video configs 32 × 8.</li>
+  <li><strong>Training vs. inference steps</strong>: the Flow-GRPO paper rolls out with fewer sampler steps during training than at inference ("denoising reduction"); the repo's SD3 configs roll out with 10.</li>
+  <li><strong>Ratio clip and advantage clip</strong> (1e-5 and 5 in the repo), <strong>$\lambda_{\text{KL}}$</strong> (0 in the paper's runs), and <strong>which steps are trained</strong> (next).</li>
+</ul>
+
+<h4>Variants: Flow-GRPO-Fast, DanceGRPO, Flow-DPPO</h4>
+<p><strong>Flow-GRPO-Fast.</strong> Training every one of $T$ steps costs $T$ forward-backward passes per sample. Fast runs the SDE only inside a short window of steps and the deterministic ODE elsewhere, and trains only the windowed steps. In the repo's SD3 GenEval config the window is 3 contiguous steps drawn from the first 5 of 10 (the high-noise end, where exploration matters most); the video config trains 2 of the first 6 of 16. The paper's image experiments pair Fast with CPS (coefficients-preserving sampling, Wang and Yu 2025), the <code>else</code> branch in the code above: it re-mixes the predicted $\hat x_0=x-t\,v_{\text{sd3}}$ and predicted noise $\hat x_1=x+(1-t)v_{\text{sd3}}$ so that the next state's noise level exactly matches the schedule, and it scores transitions with an unnormalized negative squared error (<code>likelihood: mse</code>) rather than a Gaussian density.</p>
+<p><strong>DanceGRPO</strong> (Xue et al., 2025) applies the same group-normalized clipped objective with a differently parameterized SDE (the <code>dance</code> branch: constant diffusion $\eta$, drift $v+\tfrac{\eta^2}{2}\nabla\log p_t$), shares the initial noise within a prompt group, trains a random subset of timesteps per sample, and was the first to scale this recipe to video.</p>
+<p><strong>Flow-DPPO</strong> (Ping et al., 2026) replaces the ratio clip with a KL-based mask: compute the per-transition KL between current and old Gaussians, and drop a sample's surrogate only if the KL exceeds a threshold <em>and</em> the ratio is moving in the direction the advantage wants. DiffusionART borrows this "mask outward drift, keep inward corrections" idea for its trust-region mask in Step 4.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/policy.py · L105–116</span> Flow-DPPO's KL-ADV mask: no ratio clipping; a transition is removed only when it has already drifted (KL ≥ threshold) in the advantage-favored direction.</figcaption>
+<pre><code class="language-python">    delta = _log_ratio(log_prob, old_log_prob)
+    if len(current_mean) != len(log_prob):
+        raise ValueError("transition means and log probabilities must share item count")
+    threshold = scalar(kl_mask_threshold, "kl_mask_threshold")
+    ratio = delta.exp()
+    advantage = vector(advantages, ratio, "advantages").to(ratio)
+    kl = transition_kl_per_sample(current_mean, old_mean, transition_std)
+    high = kl &gt;= threshold
+    removed = high &amp; (((ratio &gt; 1) &amp; (advantage &gt; 0)) | ((ratio &lt; 1) &amp; (advantage &lt; 0)))
+    keep = (~removed).detach()
+    policy = torch.where(keep, -advantage * ratio, torch.zeros_like(ratio))
+    return {"per_item_loss": policy, "ratio": ratio, "keep_mask": keep, "kl": kl.detach()}</code></pre>
+</figure>
+
+<h4>The credit-assignment weakness, made precise</h4>
+<p>The paper's diagnosis of reverse-process RL is one sentence: its policy gradient "updates each selected transition along its own transition-level sampling noise, weighted by a trajectory-level advantage that this transition only partly determines." You can derive both halves in three lines. A sampled transition is $x_{k-1}=\mu_\theta(x_k)+\sigma_k\xi_k$ with $\xi_k\sim\mathcal N(0,I)$. The derivative of its log-density with respect to the mean, at the sampled point, is</p>
+<div class="math-block">\[ \nabla_{\mu}\log\mathcal N(x_{k-1};\mu,\sigma_k^2I)\Big|_{\mu=\mu_{\text{old}}}=\frac{x_{k-1}-\mu_{\text{old}}}{\sigma_k^2}=\frac{\xi_k}{\sigma_k}. \]</div>
+<p>So at the on-policy point the output-space push that trajectory $i$ applies at its step $k$ is $A_i\,\xi_{i,k}/\sigma_k$ (times $h(1+\nu^2/2)$ to convert from mean to velocity). <em>Direction</em>: the noise that happened to be drawn at that step, a random vector in $\mathbb R^D$. <em>Weight</em>: an advantage computed from the endpoint, which depends on all $T$ noise draws, not just this one. Averaged over many samples, only the component of $\xi_{i,k}$ that is correlated with reward survives; per state, most of the push is noise.</p>
+
+<p>A linear-Gaussian toy makes the dilution visible. Let the endpoint be $x_0=\sum_{k=1}^{N}s\,\xi_k$ and the reward $R=\langle x_0,w\rangle$ for a unit vector $w$, which is the true improving direction. Compare the per-step push $\sum_iA_i\xi_{i,k}$ against the endpoint covariance $\sum_iA_i(x_0^{(i)}-\bar x_0)$, which pools all steps before looking at the direction:</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Cosine between the update direction and the true improving direction $w$, $K=8$, averaged over 2000 groups.</figcaption>
+<pre><code class="language-python">import torch
+
+torch.manual_seed(0)
+K, s, trials = 8, 0.3, 2000
+
+def cos(a, b):
+    return (a * b).sum(-1) / (a.norm(dim=-1) * b.norm(dim=-1))
+
+print(" D    N   cos(per-step push, w)   cos(endpoint covariance, w)")
+for D in (16, 1024):
+    w = torch.nn.functional.normalize(torch.randn(D), dim=0)
+    for N in (1, 10):
+        xi = torch.randn(trials, K, N, D)
+        x0 = s * xi.sum(2)                               # mu = 0 without loss of generality
+        R = x0 @ w
+        A = (R - R.mean(1, keepdim=True)) / R.std(1, keepdim=True)
+        push = (A[:, :, None, None] * xi).sum(1)          # [trials, N, D]
+        cov = (A[:, :, None] * (x0 - x0.mean(1, keepdim=True))).sum(1)
+        print(f"{D:4d} {N:4d}   {cos(push, w).mean():.3f}                   {cos(cov, w).mean():.3f}")</code></pre>
+<pre><code class="language-text"> D    N   cos(per-step push, w)   cos(endpoint covariance, w)
+  16    1   0.554                   0.554
+  16   10   0.198                   0.555
+1024    1   0.080                   0.080
+1024   10   0.025                   0.080</code></pre>
+</figure>
+
+<p>With one step the two coincide. With ten steps, each step's own push is about $\sqrt{10}\approx3.2$ times less aligned, because each step's noise explains only a tenth of the reward variance. Be careful with what this toy does and does not show. If every state mapped to the parameters through the same Jacobian, summing the per-step parameter gradients would recover the pooled direction. Real networks map different states through different Jacobians, so each state's update really is driven by its own noisy push. The point to keep: the reward-relevant direction is a property of the <em>endpoints and rewards</em>; reverse-process RL only reaches it indirectly, by averaging likelihood gradients whose per-state directions are mostly sampling noise. DiffusionART computes that direction first and hands it to every state (Step 4).</p>
+
+<div class="callout llm"><p class="callout-title">In LLM terms</p>
+<p>Flow-GRPO is GRPO with the sequence-level advantage broadcast to every token, exactly as in LLM GRPO. What carries over: group normalization, the clipped ratio, the off-by-one-update staleness, zero-advantage filtering. What breaks: an LLM token's log-prob gradient pushes toward a single sampled vocabulary item, which carries meaning on its own. Here the "token" is a Gaussian noise draw in $\mathbb R^D$, and its gradient pushes along that draw, which is mostly meaningless for the reward. Also, the rollout sampler must be changed (ODE to SDE) only so that a likelihood exists; the deployed sampler is still the ODE. Imagine having to add temperature noise to greedy decoding only so you can compute a ratio.</p></div>
+
+<div class="callout warn"><p class="callout-title">Pitfall</p>
+<p>The trained SDE policy and the deployed ODE sampler share a velocity network but are different samplers. Improving the SDE's reward improves the ODE's reward only to the extent that the two share their marginals, which holds exactly only for the ideal velocity. Also note which convention your log-prob uses: the repo's is a per-element mean, so a "ratio" of $1+10^{-5}$ already corresponds to a sizeable change in the full-dimensional density.</p></div>
+
+<h3 id="s3-nft">DiffusionNFT: online RL on the forward process</h3>
+
+<p>DiffusionNFT (Zheng et al., 2025) is the baseline DiffusionART is built against, and the paper's entire analysis (§2, §3) is about it. Read this section slowly.</p>
+
+<h4>Motivation</h4>
+<p>Flow-GRPO pays three taxes: it must swap the ODE for an SDE, it must store and replay trajectories with exact log-densities, and its per-state signal is noisy. DiffusionNFT avoids all three by going back to the objective the model was pretrained with. Flow matching trains $v_\theta$ by regressing $u_t=x_0-\epsilon$ on forward-noised states $x_t=(1-t)x_0+t\epsilon$. DiffusionNFT keeps that regression and changes only <em>which</em> $x_0$ it regresses toward and with what weight. The rollout can use any black-box sampler (the repo uses a second-order DPM-Solver for SD3), needs only the clean endpoints and their rewards, and needs no likelihood. The NFT paper reports large efficiency gains over Flow-GRPO, and the DiffusionART paper confirms that NFT with a tuned EMA is the strongest baseline on SD3.5-M.</p>
+
+<h4>The goodness weight $r$</h4>
+<p>NFT maps each raw reward to a number in $[0,1]$, read as "how much this sample belongs to the good set":</p>
+<div class="math-block">\[ r_i=\tfrac12\Big[1+\operatorname{clip}\Big(\frac{R_i-\bar R_c}{Z_c},-1,1\Big)\Big]\in[0,1],\qquad \bar R_c=\frac1K\sum_iR_i,\quad Z_c&gt;0. \]</div>
+<p>A sample at the group mean gets $r=\tfrac12$ (neutral). Without clipping, $2r_i-1=(R_i-\bar R_c)/Z_c$ is a centered advantage, so $\sum_i(2r_i-1)=0$. In the repo the advantage is first standardized, $A_i=(R_i-\bar R_c)/(\operatorname{std}_{\text{batch}}+10^{-4})$, clipped to $\pm5$, and then <code>probability = (A/5)/2 + 0.5</code>; that is the formula above with $Z_c=5(\operatorname{std}_{\text{batch}}+10^{-4})$. With a typical standardized advantage of $\pm1$, $r$ lands near 0.4 or 0.6: NFT's weights are mild by default.</p>
+<p><strong>Worked example.</strong> $K=4$ rewards $R=(0.9,0.5,0.3,0.7)$: $\bar R_c=0.6$, population std $=\sqrt{0.05}=0.2236$, $A=(1.342,-0.447,-1.342,0.447)$, so with $Z_c=5\cdot0.2236$: $r=(0.634,0.455,0.366,0.545)$ and $2r-1=(0.268,-0.089,-0.268,0.089)$, which sums to zero.</p>
+
+<h4>Positive and negative endpoint distributions</h4>
+<p>Reweighting the rollout distribution by $r$ and by $1-r$ splits it into two normalized distributions:</p>
+<div class="math-block">\[ p_+(x_0\mid c)=\frac{r(x_0,c)\,p_{\text{old}}(x_0\mid c)}{Z_+(c)},\quad p_-(x_0\mid c)=\frac{[1-r(x_0,c)]\,p_{\text{old}}(x_0\mid c)}{Z_-(c)},\quad Z_+=\mathbb E_{p_{\text{old}}}[r],\ Z_-=\mathbb E_{p_{\text{old}}}[1-r]. \]</div>
+<p>Since $r+(1-r)=1$, the old distribution is exactly the mixture $p_{\text{old}}=Z_+p_++Z_-p_-$ with $Z_++Z_-=1$. The aim of RL is to move $p_{\text{old}}$ toward $p_+$ and away from $p_-$.</p>
+
+<h4>Collinearity of the ideal velocities, derived</h4>
+<p>Every endpoint distribution $P_b$ ($b\in\{+,\text{old},-\}$) induces, through forward noising, a joint law $Q_b$ over $(x_0,\epsilon,x_t,u_t)$ and an <em>ideal forward velocity</em> $v^b_{\text{fwd}}(s_t)=\mathbb E_{Q_b}[u_t\mid s_t]$ at each state $s_t=(x_t,t,c)$. This is the velocity a perfectly trained flow model of $P_b$ would output. Fix a state and define</p>
+<div class="math-block">\[ q:=\mathbb E_{Q_{\text{old}}}[r(x_0,c)\mid s_t],\qquad g:=\operatorname{Cov}_{Q_{\text{old}}}[r(x_0,c),u_t\mid s_t]. \]</div>
+<p>$q$ is the posterior mean goodness of the endpoints that could have produced $x_t$; $g$ is how goodness co-varies with the velocity target at that state. The paper's Lemma 1 states $q(v^+_{\text{fwd}}-v^{\text{old}}_{\text{fwd}})=(1-q)(v^{\text{old}}_{\text{fwd}}-v^-_{\text{fwd}})=g$. The proof is short and worth doing yourself:</p>
+<ol>
+  <li>$P_+$ reweights only $x_0$, and $\epsilon$ is independent of $x_0$, so the whole joint law is reweighted the same way: $Q_+=\frac{r}{Z_+}Q_{\text{old}}$.</li>
+  <li>Marginalize onto $x_t$: $Q_+(x_t)=\frac{q}{Z_+}Q_{\text{old}}(x_t)$, by the definition of $q$ as the conditional mean of $r$.</li>
+  <li>Divide (Bayes): $Q_+(\cdot\mid s_t)=\frac{r}{q}\,Q_{\text{old}}(\cdot\mid s_t)$. Likewise $Q_-(\cdot\mid s_t)=\frac{1-r}{1-q}\,Q_{\text{old}}(\cdot\mid s_t)$.</li>
+  <li>Take expectations of $u_t$: $q\,v^+_{\text{fwd}}=\mathbb E_{\text{old}}[r\,u_t\mid s_t]$ and $(1-q)v^-_{\text{fwd}}=\mathbb E_{\text{old}}[(1-r)u_t\mid s_t]$.</li>
+  <li>Subtract $q\,v^{\text{old}}_{\text{fwd}}=q\,\mathbb E_{\text{old}}[u_t\mid s_t]$: $q(v^+_{\text{fwd}}-v^{\text{old}}_{\text{fwd}})=\mathbb E[ru_t]-\mathbb E[r]\mathbb E[u_t]=g$. The negative side is identical with $1-r$.</li>
+</ol>
+<p>So the three ideal velocities lie on one line through $v^{\text{old}}_{\text{fwd}}$ with direction $g$: the positive one at distance $g/q$ ahead, the negative one at $g/(1-q)$ behind. "Move toward $p_+$" and "move away from $p_-$" are the same instruction with different step sizes. You can check this exactly on a finite endpoint set, where the posterior over endpoints at a fixed $x_t$ is a softmax of Gaussian log-likelihoods:</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Exact check of Lemma 1: $p_{\text{old}}$ uniform over 6 endpoints in 2D, $t=0.6$, one fixed state.</figcaption>
+<pre><code class="language-python">import torch
+
+torch.manual_seed(1)
+K, D, t = 6, 2, 0.6
+x0 = torch.randn(K, D, dtype=torch.float64) * 2
+R = torch.randn(K, dtype=torch.float64)
+Z = 1.5 * R.std(unbiased=False)
+r = 0.5 * (1 + ((R - R.mean()) / Z).clamp(-1, 1))   # goodness weights
+xt = torch.tensor([0.3, -0.4], dtype=torch.float64)    # one fixed state s_t
+
+log_lik = -((xt - (1 - t) * x0) ** 2).sum(1) / (2 * t**2)
+post = torch.softmax(log_lik, 0)                      # Q_old(x0 | x_t), uniform prior
+u_given_x0 = x0 - (xt - (1 - t) * x0) / t             # u_t is a function of (x0, x_t)
+
+def v_fwd(weights):                                   # posterior under a reweighted prior
+    w = post * weights
+    return (w[:, None] * u_given_x0).sum(0) / w.sum()
+
+v_old, v_pos, v_neg = v_fwd(torch.ones(K)), v_fwd(r), v_fwd(1 - r)
+q = (post * r).sum()
+g = (post[:, None] * (r[:, None] - q) * u_given_x0).sum(0)   # Cov(r, u_t | s_t)
+print("q =", round(q.item(), 4))
+print("q (v+ - v_old)     =", (q * (v_pos - v_old)).numpy().round(6))
+print("(1-q)(v_old - v-)  =", ((1 - q) * (v_old - v_neg)).numpy().round(6))
+print("g = Cov(r, u | s_t) =", g.numpy().round(6))</code></pre>
+<pre><code class="language-text">q = 0.5224
+q (v+ - v_old)     = [-0.095586 -0.215619]
+(1-q)(v_old - v-)  = [-0.095586 -0.215619]
+g = Cov(r, u | s_t) = [-0.095586 -0.215619]</code></pre>
+</figure>
+
+<figure class="diagram">
+  <svg viewBox="0 0 680 320" role="img" aria-label="At a fixed state x_t, the ideal forward velocities of the negative, old and positive endpoint distributions lie on one line along the reward-tilt direction g. The positive one sits g over q ahead of the old one, the negative one g over one minus q behind. The reverse sampler's actual velocity sits off this line, separated by the gap e.">
+    <defs>
+      <marker id="s3-arrow-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent)"/></marker>
+      <marker id="s3-arrow-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/></marker>
+    </defs>
+    <text x="20" y="30" style="fill:var(--fg);font-size:14px;font-weight:600">Velocity space at one state s_t = (x_t, t, c)</text>
+    <line x1="60" y1="150" x2="640" y2="150" style="stroke:var(--line);stroke-width:1.5;stroke-dasharray:6 5"/>
+    <text x="590" y="140" style="fill:var(--muted);font-size:12px">line along g</text>
+    <!-- negative -->
+    <circle cx="130" cy="150" r="7" style="fill:var(--bad)"/>
+    <text x="104" y="125" style="fill:var(--fg);font-size:13px">v_fwd<tspan dy="-6" style="font-size:10px">−</tspan></text>
+    <!-- old -->
+    <circle cx="310" cy="150" r="7" style="fill:var(--fg)"/>
+    <text x="280" y="125" style="fill:var(--fg);font-size:13px">v_fwd<tspan dy="-6" style="font-size:10px">old</tspan></text>
+    <!-- positive -->
+    <circle cx="430" cy="150" r="7" style="fill:var(--good)"/>
+    <text x="410" y="125" style="fill:var(--fg);font-size:13px">v_fwd<tspan dy="-6" style="font-size:10px">+</tspan></text>
+    <!-- g arrow -->
+    <line x1="314" y1="168" x2="382" y2="168" style="stroke:var(--accent);stroke-width:3" marker-end="url(#s3-arrow-acc)"/>
+    <text x="330" y="190" style="fill:var(--accent);font-size:13px;font-weight:600">g</text>
+    <!-- distance braces -->
+    <line x1="310" y1="98" x2="430" y2="98" style="stroke:var(--muted);stroke-width:1" marker-start="url(#s3-arrow-mut)" marker-end="url(#s3-arrow-mut)"/>
+    <text x="350" y="90" style="fill:var(--muted);font-size:12px">g / q</text>
+    <line x1="130" y1="98" x2="310" y2="98" style="stroke:var(--muted);stroke-width:1" marker-start="url(#s3-arrow-mut)" marker-end="url(#s3-arrow-mut)"/>
+    <text x="190" y="90" style="fill:var(--muted);font-size:12px">g / (1 − q)</text>
+    <!-- reverse field -->
+    <circle cx="280" cy="250" r="7" style="fill:none;stroke:var(--fg);stroke-width:2"/>
+    <text x="150" y="282" style="fill:var(--fg);font-size:13px">v_rvs<tspan dy="-6" style="font-size:10px">old</tspan><tspan dy="6"> = v_old (what the sampler uses)</tspan></text>
+    <line x1="284" y1="243" x2="307" y2="158" style="stroke:var(--muted);stroke-width:1.5;stroke-dasharray:4 3"/>
+    <text x="280" y="210" text-anchor="end" style="fill:var(--muted);font-size:13px">gap e</text>
+    <text x="470" y="230" style="fill:var(--muted);font-size:12px">Here q = 0.6, so the positive</text>
+    <text x="470" y="246" style="fill:var(--muted);font-size:12px">point is closer than the</text>
+    <text x="470" y="262" style="fill:var(--muted);font-size:12px">negative one.</text>
+  </svg>
+  <figcaption>Lemma 1 in a picture. The three ideal forward velocities are collinear along the reward-tilt direction $g$, so either branch alone points the right way. The open circle is the velocity the reverse sampler actually uses; NFT's targets are built from forward-noised endpoints and implicitly assume it sits on the line ($e=0$). Step 4 shows what the gap $e$ does to the loss.</figcaption>
+</figure>
+
+<h4>The implicit parameterization and the loss</h4>
+<p>We would like to train a positive model toward $v^+_{\text{fwd}}$ and a negative model toward $v^-_{\text{fwd}}$, but we only want one network. NFT therefore defines both <em>implicitly</em> from the single trainable $v_\theta$ and the frozen $v_{\text{old}}$, for a scalar $\beta&gt;0$:</p>
+<div class="math-block">\[ v_{\theta,+}=v_{\text{old}}+\beta(v_\theta-v_{\text{old}}),\qquad v_{\theta,-}=v_{\text{old}}-\beta(v_\theta-v_{\text{old}}). \]</div>
+<p>They are mirror images around $v_{\text{old}}$. Each is fit to the same flow-matching target $u_t$, weighted by goodness:</p>
+<div class="math-block">\[ \mathcal L_{\text{NFT}}=\mathbb E_{\mathcal D_{\text{old}}}\Big[r\,\lVert v_{\theta,+}-u_t\rVert_2^2+(1-r)\,\lVert v_{\theta,-}-u_t\rVert_2^2\Big], \]</div>
+<p>where $\mathcal D_{\text{old}}$ draws $c$, $x_0\sim p_{\text{old}}(\cdot\mid c)$ with its $r$, a time $t$ and fresh noise $\epsilon$. Why mirror images? Minimizing the $r$-weighted term alone at a fixed state sets $v_{\theta,+}=\mathbb E[r\,u_t\mid s_t]/q=v^+_{\text{fwd}}$; minimizing the $(1-r)$-weighted term alone sets $v_{\theta,-}=v^-_{\text{fwd}}$. Collinearity says these two are reachable by one $v_\theta$ moving along $g$. At the joint optimum (if the forward and reverse fields agreed) the network lands at $v_\theta^\ast=v_{\text{old}}+\tfrac{2}{\beta}g$: a step along the reward-tilt direction whose length is set by $1/\beta$.</p>
+
+<h4>Equivalence to a single-target MSE, derived in full</h4>
+<p>The paper's Eq. (1) rewrites the two-branch loss as one regression. Fix one sample and write $d=v_\theta-v_{\text{old}}$ (the drift), $h=u_t-v_{\text{old}}$ (the training residual) and $A=2r-1$. The two residuals are $v_{\theta,+}-u_t=\beta d-h$ and $v_{\theta,-}-u_t=-\beta d-h$. Expand:</p>
+<div class="math-block">\[ \begin{aligned} \ell_{\text{NFT}}&amp;=r\lVert\beta d-h\rVert^2+(1-r)\lVert\beta d+h\rVert^2\\ &amp;=\beta^2\lVert d\rVert^2+\lVert h\rVert^2-2\beta\big[r-(1-r)\big]\langle d,h\rangle\\ &amp;=\beta^2\lVert d\rVert^2-2\beta A\langle d,h\rangle+\lVert h\rVert^2. \end{aligned} \]</div>
+<p>Complete the square in $d$: $\beta^2\lVert d\rVert^2-2\beta A\langle d,h\rangle=\beta^2\lVert d-\tfrac{A}{\beta}h\rVert^2-A^2\lVert h\rVert^2$. Hence</p>
+<div class="math-block">\[ \ell_{\text{NFT}}=\beta^2\Big\lVert d-\frac{A}{\beta}h\Big\rVert^2+(1-A^2)\lVert h\rVert^2,\qquad 1-A^2=4r(1-r). \]</div>
+<p>Now $d-\tfrac{A}{\beta}h=v_\theta-\big(v_{\text{old}}+\tfrac{A}{\beta}h\big)$. Define $a=(2r-1)/\beta$ and the frozen target</p>
+<div class="math-block">\[ v_{\text{tgt}}=v_{\text{old}}+a\,(u_t-v_{\text{old}})=a\,u_t+(1-a)\,v_{\text{old}}. \]</div>
+<p>Take the expectation over the frozen $\mathcal D_{\text{old}}$ (none of $r,u_t,v_{\text{old}}$ depends on $\theta$):</p>
+<div class="math-block">\[ \boxed{\ \mathcal L_{\text{NFT}}=\beta^2\,\mathbb E_{\mathcal D_{\text{old}}}\big[\lVert v_\theta-v_{\text{tgt}}\rVert_2^2\big]+\mathrm{const},\qquad \mathrm{const}=\mathbb E\big[4r(1-r)\lVert u_t-v_{\text{old}}\rVert^2\big].\ } \]</div>
+<p>Three readings of this result matter later. First, the target <em>interpolates</em> (or extrapolates) along the line from $v_{\text{old}}$ to the sample's own $u_t$: a good sample ($a&gt;0$) pulls toward its $u_t$, a bad one ($a&lt;0$) pushes away from it, a neutral one ($r=\tfrac12$) pins $v_\theta$ to $v_{\text{old}}$. Second, $v_{\text{old}}$ stays inside the target as an anchor; the paper calls this the old-policy anchor. Third, differentiate the per-sample loss: $-\nabla_{v_\theta}\ell_{\text{NFT}}=2\beta A h-2\beta^2 d$. At the on-policy point $d=0$:</p>
+<div class="math-block">\[ -\nabla_{v_\theta}\ell_{\text{NFT}}\Big|_{v_\theta=v_{\text{old}}}=2\beta\,(2r-1)\,(u_t-v_{\text{old}}). \]</div>
+<p>High- and low-reward samples drive the same kind of residual, $u_t-v_{\text{old}}$, in opposite directions. The term $-2\beta^2d$ is a restoring force toward $v_{\text{old}}$ that is zero at the on-policy point; the paper's Proposition 2 writes the loss as exactly these two pieces, $-2\beta(2r-1)\langle d,h\rangle+\beta^2\lVert d\rVert^2$, and Step 4 shows that the second piece is what keeps NFT stable.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Numerical check: two-branch NFT loss vs. $\beta^2\times$ single-target MSE on a small MLP, with $\theta\ne\theta_{\text{old}}$ so the drift is nonzero; then the on-policy descent direction.</figcaption>
+<pre><code class="language-python">import torch
+
+torch.manual_seed(0)
+D, N = 4, 64                                   # feature dim, batch of (x0, eps, t) items
+
+net = torch.nn.Sequential(torch.nn.Linear(D + 1, 32), torch.nn.Tanh(), torch.nn.Linear(32, D))
+old = torch.nn.Sequential(torch.nn.Linear(D + 1, 32), torch.nn.Tanh(), torch.nn.Linear(32, D))
+old.load_state_dict(net.state_dict())
+with torch.no_grad():                          # make theta != theta_old so the drift d is nonzero
+    for p in net.parameters():
+        p.add_(0.05 * torch.randn_like(p))
+
+x0, eps = torch.randn(N, D), torch.randn(N, D)
+t = torch.rand(N, 1)
+xt = (1 - t) * x0 + t * eps
+u = x0 - eps                                   # sample velocity target
+r = torch.rand(N, 1)                           # goodness weights in [0, 1]
+
+def v(model):
+    return model(torch.cat([xt, t], dim=1))
+
+def two_branch(beta):
+    v_th, v_old = v(net), v(old).detach()
+    v_pos = v_old + beta * (v_th - v_old)      # implicit positive policy
+    v_neg = v_old - beta * (v_th - v_old)      # implicit negative policy
+    per = r * (v_pos - u).pow(2).sum(1, keepdim=True) + (1 - r) * (v_neg - u).pow(2).sum(1, keepdim=True)
+    return per.mean()
+
+def single_target(beta):
+    v_th, v_old = v(net), v(old).detach()
+    a = (2 * r - 1) / beta
+    v_tgt = (a * u + (1 - a) * v_old).detach()
+    return (v_th - v_tgt).pow(2).sum(1, keepdim=True).mean()
+
+def grads(loss):
+    net.zero_grad()
+    loss.backward()
+    return torch.cat([p.grad.flatten() for p in net.parameters()])
+
+for beta in (1.0, 0.1):
+    l2, l1 = two_branch(beta), single_target(beta)
+    g2, g1 = grads(two_branch(beta)), grads(single_target(beta))
+    with torch.no_grad():                      # the theta-independent constant from the proof
+        h = u - v(old)
+        const = (4 * r * (1 - r) * h.pow(2).sum(1, keepdim=True)).mean()
+    print(f"beta={beta:4.2f}  L_NFT={l2.item():.6f}  beta^2*L_MSE+const={(beta**2 * l1 + const).item():.6f}"
+          f"  max|g_NFT - beta^2 g_MSE|={(g2 - beta**2 * g1).abs().max().item():.2e}"
+          f"  |g_NFT|={g2.norm().item():.4f}")
+
+# Descent direction at the on-policy point v_theta = v_old (d = 0).
+beta = 0.5
+v_old = v(old).detach()
+v_th = v_old.clone().requires_grad_(True)
+v_pos, v_neg = v_old + beta * (v_th - v_old), v_old - beta * (v_th - v_old)
+loss = (r * (v_pos - u).pow(2).sum(1, keepdim=True) + (1 - r) * (v_neg - u).pow(2).sum(1, keepdim=True)).sum()
+loss.backward()
+predicted = 2 * beta * (2 * r - 1) * (u - v_old)
+print(f"on-policy: max|-grad - 2*beta*(2r-1)*(u - v_old)| = {(-v_th.grad - predicted).abs().max().item():.2e}")</code></pre>
+<pre><code class="language-text">beta=1.00  L_NFT=7.774239  beta^2*L_MSE+const=7.774239  max|g_NFT - beta^2 g_MSE|=5.22e-08  |g_NFT|=1.3649
+beta=0.10  L_NFT=7.680642  beta^2*L_MSE+const=7.680642  max|g_NFT - beta^2 g_MSE|=5.59e-09  |g_NFT|=0.0891
+on-policy: max|-grad - 2*beta*(2r-1)*(u - v_old)| = 2.38e-07</code></pre>
+</figure>
+
+<h4>What $\beta$ does: a worked example</h4>
+<p>Take one coordinate with $u_t=1.0$ and $v_{\text{old}}=0.2$, so $h=0.8$.</p>
+<ul>
+  <li>$r=0.9,\ \beta=1$: $a=0.8$, $v_{\text{tgt}}=0.8\cdot1.0+0.2\cdot0.2=0.84$. The initial force is $2\beta(2r-1)h=1.28$.</li>
+  <li>$r=0.1,\ \beta=1$: $a=-0.8$, $v_{\text{tgt}}=-0.8+1.8\cdot0.2=-0.44$, pushing away from $u_t$.</li>
+  <li>$r=0.9,\ \beta=0.1$: $a=8$, $v_{\text{tgt}}=8-7\cdot0.2=6.6$. The target is far beyond $u_t$, but the loss carries a $\beta^2=0.01$ prefactor, so the initial force is only $0.128$.</li>
+</ul>
+<p>The force at $d=0$ scales with $\beta$, while the target offset scales with $1/\beta$. With Adam, a uniform rescaling of the loss is largely normalized away, so in practice smaller $\beta$ behaves like a <em>more aggressive</em> target: the equilibrium drift is $d^\ast=(2r-1)h/\beta$. This is why the repo's OCR recipe ($\beta=0.1$) needs a much stronger anchor (EMA retention up to 0.999) than its GenEval recipe ($\beta=1$, retention up to 0.5). The explorer below lets you move $r$ and $\beta$ and drag $u_t$.</p>
+
+<figure class="widget" id="w3-nft-target">
+  <canvas id="w3-canvas" height="320" aria-label="2D plot of v_old, u_t and the NFT target v_tgt on the line through them"></canvas>
+  <div class="widget-controls">
+    <label for="w3-r">goodness r <output id="w3-r-out">0.80</output></label>
+    <input type="range" id="w3-r" min="0" max="1" step="0.01" value="0.8">
+    <label for="w3-beta">β <output id="w3-beta-out">1.00</output></label>
+    <input type="range" id="w3-beta" min="0.05" max="2" step="0.01" value="1">
+    <button type="button" id="w3-reset">Reset</button>
+  </div>
+  <p id="w3-readout" aria-live="polite"></p>
+  <figcaption>NFT target explorer. $v_{\text{tgt}}=v_{\text{old}}+a(u_t-v_{\text{old}})$ with $a=(2r-1)/\beta$. Drag the $u_t$ point. The arrow is the on-policy descent direction $2\beta(2r-1)(u_t-v_{\text{old}})$; the view rescales so all points stay visible. At $r=\tfrac12$ the target collapses onto $v_{\text{old}}$; for $r&gt;\tfrac12+\beta/2$ it overshoots $u_t$.</figcaption>
+</figure>
+<script>(() => {
+  const root = document.getElementById('w3-nft-target');
+  if (!root) return;
+  const canvas = root.querySelector('#w3-canvas');
+  const rIn = root.querySelector('#w3-r'), bIn = root.querySelector('#w3-beta');
+  const rOut = root.querySelector('#w3-r-out'), bOut = root.querySelector('#w3-beta-out');
+  const readout = root.querySelector('#w3-readout');
+  const reset = root.querySelector('#w3-reset');
+  const vOld = { x: -0.6, y: -0.3 };
+  const U0 = { x: 1.0, y: 0.7 };
+  let u = { x: U0.x, y: U0.y };
+  let view = { cx: 0, cy: 0, scale: 60 };
+  let dragging = false;
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || '#888';
+  function state() {
+    const r = parseFloat(rIn.value), beta = parseFloat(bIn.value);
+    const a = (2 * r - 1) / beta;
+    const tgt = { x: vOld.x + a * (u.x - vOld.x), y: vOld.y + a * (u.y - vOld.y) };
+    const k = 2 * beta * (2 * r - 1);
+    const force = { x: k * (u.x - vOld.x), y: k * (u.y - vOld.y) };
+    return { r, beta, a, tgt, force };
+  }
+  function fit(s) {
+    const pts = [vOld, u, s.tgt, { x: vOld.x + s.force.x, y: vOld.y + s.force.y }];
+    let minx = Math.min(...pts.map(p => p.x)), maxx = Math.max(...pts.map(p => p.x));
+    let miny = Math.min(...pts.map(p => p.y)), maxy = Math.max(...pts.map(p => p.y));
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const spanx = Math.max(maxx - minx, 3), spany = Math.max(maxy - miny, 3);
+    view.cx = (minx + maxx) / 2; view.cy = (miny + maxy) / 2;
+    view.scale = Math.min((w - 70) / spanx, (h - 60) / spany);
+  }
+  const toPx = (p) => ({ x: canvas.clientWidth / 2 + (p.x - view.cx) * view.scale,
+                         y: canvas.clientHeight / 2 - (p.y - view.cy) * view.scale });
+  const fromPx = (px, py) => ({ x: view.cx + (px - canvas.clientWidth / 2) / view.scale,
+                                y: view.cy - (py - canvas.clientHeight / 2) / view.scale });
+  function arrow(ctx, a, b, color, width) {
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+    if (len < 2) return;
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    const ux = dx / len, uy = dy / len, s = 9;
+    ctx.beginPath(); ctx.moveTo(b.x, b.y);
+    ctx.lineTo(b.x - s * ux + s * 0.5 * uy, b.y - s * uy - s * 0.5 * ux);
+    ctx.lineTo(b.x - s * ux - s * 0.5 * uy, b.y - s * uy + s * 0.5 * ux);
+    ctx.closePath(); ctx.fill();
+  }
+  function dot(ctx, p, color, filled, label) {
+    ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+    ctx.lineWidth = 2; ctx.strokeStyle = color; ctx.fillStyle = color;
+    filled ? ctx.fill() : ctx.stroke();
+    ctx.fillStyle = css('--fg'); ctx.font = '13px system-ui, sans-serif';
+    ctx.fillText(label, p.x + 9, p.y - 9);
+  }
+  function draw() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.parentElement.clientWidth;
+    canvas.style.width = w + 'px'; canvas.style.height = '320px';
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(320 * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const s = state();
+    if (!dragging) fit(s);
+    ctx.fillStyle = css('--surface'); ctx.fillRect(0, 0, w, 320);
+    const pO = toPx(vOld), pU = toPx(u), pT = toPx(s.tgt);
+    const dir = { x: pU.x - pO.x, y: pU.y - pO.y };
+    ctx.strokeStyle = css('--line'); ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
+    ctx.beginPath(); ctx.moveTo(pO.x - dir.x * 20, pO.y - dir.y * 20); ctx.lineTo(pO.x + dir.x * 20, pO.y + dir.y * 20); ctx.stroke();
+    ctx.setLineDash([]);
+    const fEnd = toPx({ x: vOld.x + s.force.x, y: vOld.y + s.force.y });
+    arrow(ctx, pO, fEnd, s.r >= 0.5 ? css('--accent') : css('--bad'), 3);
+    dot(ctx, pU, css('--muted'), true, 'u_t');
+    dot(ctx, pO, css('--fg'), true, 'v_old');
+    dot(ctx, pT, css('--fg'), false, 'v_tgt');
+    rOut.textContent = s.r.toFixed(2); bOut.textContent = s.beta.toFixed(2);
+    const regime = Math.abs(s.r - 0.5) < 1e-9 ? 'neutral: target = v_old'
+      : s.a > 1 ? 'extrapolates beyond u_t' : s.a > 0 ? 'interpolates toward u_t' : 'pushes away from u_t';
+    readout.textContent = `a = (2r−1)/β = ${s.a.toFixed(2)} (${regime}); loss prefactor β² = ${(s.beta * s.beta).toFixed(3)}; ` +
+      `on-policy force = ${(2 * s.beta * (2 * s.r - 1)).toFixed(3)} × (u_t − v_old); equilibrium drift d* = ${s.a.toFixed(2)} × (u_t − v_old).`;
+  }
+  function pos(e) { const b = canvas.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; }
+  canvas.addEventListener('pointerdown', (e) => {
+    const p = pos(e), pu = toPx(u);
+    if (Math.hypot(p.x - pu.x, p.y - pu.y) < 18) { dragging = true; canvas.setPointerCapture(e.pointerId); }
+  });
+  canvas.addEventListener('pointermove', (e) => { if (!dragging) return; const p = pos(e); u = fromPx(p.x, p.y); draw(); });
+  const end = () => { if (dragging) { dragging = false; draw(); } };
+  canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
+  rIn.addEventListener('input', draw); bIn.addEventListener('input', draw);
+  reset.addEventListener('click', () => { u = { x: U0.x, y: U0.y }; rIn.value = 0.8; bIn.value = 1; draw(); });
+  if (window.ResizeObserver) new ResizeObserver(() => draw()).observe(root);
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', draw);
+  draw();
+})();</script>
+
+<h4>One training iteration, step by step</h4>
+<ol>
+  <li><strong>Rollout under $\theta_{\text{old}}$.</strong> Sample $K$ endpoints per prompt with a deterministic solver using the <em>old</em> (EMA) weights. Nothing is stored except the endpoints.</li>
+  <li><strong>Reward and $r$.</strong> Score endpoints, standardize within each prompt, convert to $r\in[0,1]$.</li>
+  <li><strong>Re-noise.</strong> For each endpoint pick several times $t$ (the repo uses 9 or 10 per endpoint, chosen at random per row) and draw <em>fresh</em> noise: $x_t=(1-t)x_0+t\epsilon$. These states are generally not the states the sampler visited.</li>
+  <li><strong>Cache $v_{\text{old}}$</strong> at those states with the old weights, under no-grad.</li>
+  <li><strong>Update.</strong> Minimize $\mathcal L_{\text{NFT}}$ with one or two optimizer steps (two disjoint halves of the rollout in the repo's OCR recipe).</li>
+  <li><strong>EMA refresh.</strong> $\theta_{\text{old}}\leftarrow\eta\,\theta_{\text{old}}+(1-\eta)\theta$, once per rollout.</li>
+</ol>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/training/rollout.py · L214–215</span> and <span class="tag">src/visual_rl/training/nft.py · L182–193</span> Step 3 and step 4: training states are re-noised endpoints, and old predictions are computed with the old-policy shadow swapped in. Sigma here is $t$ in our notation; the forward interpolation is the same in both conventions.</figcaption>
+<pre><code class="language-python">    t = sigmas.detach().to(endpoints.device).float().reshape((-1,) + (1,) * (endpoints.ndim - 1))
+    return (1 - t) * endpoints.detach().float() + t * noise.detach().to(endpoints.device).float()
+
+# ---- src/visual_rl/training/nft.py ----
+    with state.old.use():
+        for start in range(0, len(x0), c.training.microbatch):
+            stop = start + c.training.microbatch
+            old_predictions[start:stop] = (
+                predict(
+                    states[start:stop].to(device),
+                    times[start:stop].to(device),
+                    row_indices[start:stop].to(device),
+                )
+                .float()
+                .cpu()
+            )</code></pre>
+</figure>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/nft.py · L50, L59–71</span> The repo's NFT loss. SD3 convention: <code>prediction</code> $=-v_\theta$ and <code>state - t * v</code> is the implied clean estimate $\hat x_0$, so <code>positive_delta</code> $=\hat x_0(v_{\theta,+})-x_0=-t\,(u_t-v_{\theta,+})$. Each branch is a velocity residual scaled by $t$, then divided by its own detached mean absolute value (adaptive weighting).</figcaption>
+<pre><code class="language-python">    advantage = vector(advantages, prediction, "advantages").clamp(-clip, clip)
+    # ... L51–58: optional adv_mode transforms, default "all" leaves advantages unchanged ...
+    probability = ((advantage / clip) / 2 + 0.5).clamp(0, 1)
+    old = old_prediction.detach().to(prediction)
+    t = expand(vector(sigma, prediction, "sigma"), prediction)
+    endpoint = x0.detach().to(device=prediction.device)
+    state = xt.detach().to(device=prediction.device)
+    positive_delta = state - t * (nft_beta * prediction + (1 - nft_beta) * old) - endpoint
+    negative_delta = state - t * ((1 + nft_beta) * old - nft_beta * prediction) - endpoint
+    dims = tuple(range(1, prediction.ndim))
+    positive_weight = positive_delta.detach().double().abs().mean(dims, keepdim=True).clamp_min(eps)
+    negative_weight = negative_delta.detach().double().abs().mean(dims, keepdim=True).clamp_min(eps)
+    positive = (positive_delta.square() / positive_weight).mean(dims)
+    negative = (negative_delta.square() / negative_weight).mean(dims)
+    policy = (probability * positive / nft_beta + (1 - probability) * negative / nft_beta) * clip</code></pre>
+</figure>
+
+<div class="callout warn"><p class="callout-title">Pitfall: the implementation is not literally Eq. (1)</p>
+<p>Because the two branches get different detached weights $w_\pm$, the branch weights are no longer exactly $r$ and $1-r$. With $\mathsf a=r/w_+$ and $\mathsf b=(1-r)/w_-$ the same completing-the-square argument gives a single-target MSE with effective coefficient $A_{\text{eff}}=(\mathsf a-\mathsf b)/(\mathsf a+\mathsf b)$ in place of $2r-1$. Running the repo's <code>nft_loss</code> on random inputs confirms this to $3\times10^{-16}$; in that run $2r-1=(0.062,-0.224,0.314,-0.365,-1)$ became $A_{\text{eff}}=(0.065,-0.234,0.293,-0.365,-1)$. The structure (one frozen target on the line through $v_{\text{old}}$ and $u_t$) is unchanged, which is all the paper's analysis needs. Exercise 3.5 asks you to derive it.</p></div>
+
+<h4>The EMA rollout policy and why it needs per-task tuning</h4>
+<p>After each rollout NFT updates the rollout weights by an exponential moving average, $\theta_{\text{old}}\leftarrow\eta\,\theta_{\text{old}}+(1-\eta)\theta$. With $\eta=0$ the rollout policy is the current policy (fully on-policy); with $\eta\to1$ it barely moves (nearly offline). The NFT default ramps $\eta=\min(0.001\,i,0.5)$ with iteration $i$. The repo implements this as <code>decay = min(max(n - delay, 0) * rate, maximum)</code> on the completed-update count:</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/training/nft.py · L117–120</span> Old-policy refresh after the optimizer step; <code>PolicyShadow.update(decay)</code> computes <code>old = decay * old + (1 - decay) * current</code>.</figcaption>
+<pre><code class="language-python">        old = self.options["old_policy"]
+        decay = min(max(successful_updates - old["delay"], 0) * old["rate"], old["maximum"])
+        if refresh_old:
+            self.old.update(decay)</code></pre>
+</figure>
+
+<p>The schedule is a per-task hyperparameter, and the paper documents the cost. The NFT paper itself reports that fully on-policy updates collapse and nearly offline updates converge impractically slowly, and that its default schedule is unstable on OCR, which needs a maximum retention of 0.999. The repo's SD3 configs make this concrete: GenEval uses <code>rate 0.001, maximum 0.5, β = 1</code>; OCR uses <code>rate 0.0075, maximum 0.999, delay 75, β = 0.1</code>, two updates per rollout; HunyuanVideo uses <code>rate 0.00125, maximum 0.6</code>. When the paper transfers the GenEval-tuned schedule and $\beta$ to FLUX.1-dev without retuning, NFT's training reward fluctuates strongly. On HunyuanVideo, on-policy NFT drives the text-alignment reward to $-4.48$ while EMA-NFT keeps it at 2.10.</p>
+
+<p>A natural explanation is that EMA helps because the rollout data are "off-policy" and change slowly. Step 4 shows, with the paper's ablations, that this is not the mechanism: what matters is that $v_{\text{old}}$ in the target lags behind $v_\theta$, so the $\beta^2\lVert d\rVert^2$ restoring term is active. For now, record the open puzzle the paper opens §3 with.</p>
+
+<div class="callout insight"><p class="callout-title">The puzzle (resolved in Step 4)</p>
+<p>Remove EMA so that $v_\theta=v_{\text{old}}$ at every update. Train with only the positive branch ($r\lVert v_{\theta,+}-u_t\rVert^2$), or only the negative branch. By Lemma 1 the two ideal directions are collinear, so either branch alone should improve reward. In the paper's Figure 2(a), consistent with the NFT paper, <em>each branch alone collapses</em>, while the two together learn. What hidden term does each branch carry that the other cancels? Hint: the targets are built from forward-noised endpoints, but $v_{\text{old}}$ is the field the <em>reverse</em> sampler used. Look again at the open circle in the diagram.</p></div>
+
+<h4>Strengths and failure modes</h4>
+<ul>
+  <li><strong>Strengths.</strong> No likelihoods, any solver, the pretraining loss shape (MSE in velocity), dense supervision (every re-noised state of every sample gets a target), and in the paper's T2I benchmarks, the strongest baseline efficiency when tuned.</li>
+  <li><strong>Failure modes.</strong> Collapse without joint branches; collapse without enough restoration (on-policy); slow learning with too much restoration; per-task tuning of $\eta$ schedule and $\beta$; and on I2V, an early plateau the paper attributes to the residual consistency force diluting guidance.</li>
+</ul>
+
+<div class="callout llm"><p class="callout-title">In LLM terms</p>
+<p>The positive branch is reward-weighted supervised fine-tuning on your own samples (think rejection-sampling fine-tuning or ReST); the negative branch is unlikelihood training on bad samples. Unlikelihood-only training is famously unstable in LLMs too. The $v_{\text{old}}$ anchor plays the role a KL-to-old-policy term plays in PPO. The sharpest analogy is <em>teacher forcing</em>: forward-process training conditions on states built from the finished sample, not on states the model generated step by step. The forward–reverse gap $e$ is the diffusion version of exposure bias, and Step 4 shows it is exactly what makes single-branch NFT fail.</p></div>
+
+<h3 id="s3-refl">ReFL: backpropagate through the reward</h3>
+
+<h4>Motivation and objective</h4>
+<p>If the reward model is a differentiable network (an aesthetic predictor, ImageReward, a VLM-based video reward), the most direct way to increase it is gradient ascent on the reward with respect to the generator's parameters. ReFL (Reward Feedback Learning), introduced with ImageReward (Xu et al., 2023), does this cheaply: run the sampler without gradients until a late step, take one denoising step with gradients to get a clean estimate $\hat x_0$, decode it, and maximize the reward. Gradients through all $T$ steps would cost $T$ times the activation memory and are numerically fragile; a single late step works because, near $t=0$, one step already determines the image well. The objective is</p>
+<div class="math-block">\[ \mathcal L_{\text{ReFL}}(\theta)=-\,\mathbb E_{c,\ x_t\sim\text{sampler}}\Big[R\big(\operatorname{Dec}(\hat x_0(x_t;\theta)),c\big)\Big],\qquad \hat x_0=x_t-t\,v_{\text{sd3}}=x_t+t\,v_\theta \text{ (paper sign)}, \]</div>
+<p>usually combined with the pretraining loss as a regularizer. The paper's comparison run uses $K=1$ sample per prompt, gradients through the frozen reward model and VAE to the final denoising step only, earlier steps detached, no KL and no EMA.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/training/video_refl.py · L39–51</span> The repo computes the reward gradient with respect to the latent endpoint in a separate staged pass (VAE and reward model), then applies it to the policy as a vector-Jacobian product through the last step only. <code>product - product.detach()</code> keeps the logged loss value while injecting the gradient.</figcaption>
+<pre><code class="language-python">    def __call__(self, items):
+        rows = torch.tensor(items, dtype=torch.int64)
+        states = self.cache.states[rows, 0].detach().to(self.device)
+        sigma = self.cache.sigmas[self.cache.selected[0]].to(self.device).expand(len(rows))
+        field = self.predict(states, sigma, rows.to(self.device))
+        shape = (-1,) + (1,) * (states.ndim - 1)
+        endpoint = states.float() - sigma.reshape(shape) * field.float()
+        if not torch.allclose(endpoint.detach(), self.cache.endpoints[rows].to(self.device), atol=2e-3, rtol=2e-3):
+            raise RuntimeError("ReFL endpoint changed before its policy VJP")
+        cotangent = self.latent_gradients[rows].detach().to(self.device)
+        product = (endpoint * cotangent).flatten(1).sum(1)
+        # Preserve original loss values while applying the unnormalized VJP.
+        return self.losses[rows].to(self.device) + (product - product.detach())</code></pre>
+</figure>
+
+<h4>Strengths, failure modes, and why DiffusionART avoids it</h4>
+<p>ReFL's signal is the richest of all: a full gradient vector per sample, no variance from sampling, so it learns from $K=1$. Its costs are structural. It needs the reward to be differentiable, which rules out GenEval's detector pipeline, OCR string matching, external VLM APIs, human or pairwise judgments and any rule-based check. It needs memory to backpropagate through a VAE decoder and a reward network, which for video is substantial. And it optimizes the reward model's gradient field directly, which is the easiest path to adversarial reward hacking. DiffusionART's design goal is to keep RL's "reward values only" contract while getting a per-state <em>direction</em> like ReFL's; in the paper's matched HunyuanVideo comparison, DiffusionART improves both rewards with fewer optimizer updates while using reward values alone.</p>
+
+<div class="callout llm"><p class="callout-title">In LLM terms</p>
+<p>There is no LLM counterpart because text is discrete: you cannot backpropagate a reward model's score through a sampled token. ReFL exists only because images live in a continuous space. The closest LLM idea is a straight-through or Gumbel-softmax relaxation, which LLM RL abandoned for the same reasons (bias, hacking, memory).</p></div>
+
+<h3 id="s3-dpo">Diffusion-DPO: offline preferences</h3>
+<p>Diffusion-DPO (Wallace et al., 2023) ports DPO to diffusion models. It starts from a fixed dataset of preference triples $(c,x_0^w,x_0^l)$ (winner, loser), such as Pick-a-Pic. DPO needs $\log p_\theta(x_0\mid c)$, which a diffusion model does not provide. Diffusion-DPO replaces it with the trajectory likelihood, bounds it with Jensen's inequality, and approximates the reverse posterior over trajectories with the forward noising process. Each step's log-ratio then becomes a difference of denoising errors. Written in this tutorial's velocity notation (Wallace et al. use $\epsilon$-prediction; the structure is identical):</p>
+<div class="math-block">\[ \mathcal L_{\text{D-DPO}}=-\,\mathbb E\,\log\sigma\Big(-\beta_{\text{D}}\big[\big(\lVert u^w_t-v_\theta(x^w_t)\rVert^2-\lVert u^w_t-v_{\text{ref}}(x^w_t)\rVert^2\big)-\big(\lVert u^l_t-v_\theta(x^l_t)\rVert^2-\lVert u^l_t-v_{\text{ref}}(x^l_t)\rVert^2\big)\big]\Big), \]</div>
+<p>with $x^{w}_t,x^{l}_t$ the forward-noised winner and loser at a shared random $t$, $\sigma$ the logistic function, and $\beta_{\text{D}}$ absorbing DPO's $\beta$ and the time weighting. In words: lower the winner's denoising error relative to the reference model more than you lower the loser's.</p>
+<p>It is <strong>offline</strong> because the pairs come from a fixed dataset generated by other models (or humans), never from the policy being trained, so nothing tells you how the current model's own samples fare. Online RL samples from the evolving generator every iteration, which is what lets it find and fix the current model's failure modes and use arbitrary black-box rewards. Notice also that Diffusion-DPO is a forward-process method: like NFT, it trains on forward-noised clean samples with an anchor model ($v_{\text{ref}}$ instead of $v_{\text{old}}$). DiffusionART-Pairwise (Step 4) shows how pairwise labels can instead feed an online method.</p>
+
+<div class="callout llm"><p class="callout-title">In LLM terms</p>
+<p>This is exactly DPO, with "log-likelihood of the response" replaced by "negative denoising error of the noised image." Everything you know about offline DPO carries over: no exploration, distribution shift between the preference data and the policy, and sensitivity to $\beta$.</p></div>
+
+<h3 id="s3-compare">Side by side</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>Method</th><th>Feedback</th><th>Needs transition likelihood?</th><th>Rollout sampler</th><th>On / off-policy</th><th>Needs differentiable reward?</th><th>Credit-assignment granularity</th><th>Stability device</th><th>Typical cost driver</th></tr></thead>
+  <tbody>
+    <tr><td>DDPO</td><td>scalar reward</td><td>yes (DDPM Gaussian)</td><td>stochastic DDIM/DDPM</td><td>on-policy (IS variant: a few epochs)</td><td>no</td><td>trajectory advantage on every step, along sampled noise</td><td>ratio clip</td><td>all $T$ steps trained</td></tr>
+    <tr><td>DPOK</td><td>scalar reward</td><td>yes</td><td>stochastic</td><td>on-policy</td><td>no</td><td>same as DDPO</td><td>per-step KL to pretrained</td><td>all steps + reference forward</td></tr>
+    <tr><td>Flow-GRPO</td><td>scalar reward, group-normalized</td><td>yes (ODE→SDE)</td><td>SDE</td><td>near on-policy (stored $\log p_{\text{old}}$)</td><td>no</td><td>trajectory advantage on every transition, along sampled noise</td><td>ratio clip (+ optional KL)</td><td>SDE rollouts + $T$ replayed steps</td></tr>
+    <tr><td>Flow-GRPO-Fast</td><td>same</td><td>yes, only in a window</td><td>ODE + short SDE window (CPS in paper's T2I)</td><td>near on-policy</td><td>no</td><td>same, only windowed steps</td><td>ratio clip</td><td>2–3 trained steps</td></tr>
+    <tr><td>DanceGRPO</td><td>same</td><td>yes</td><td>Dance SDE, shared initial noise</td><td>near on-policy</td><td>no</td><td>same, random subset of steps</td><td>ratio clip</td><td>sampled subset of steps</td></tr>
+    <tr><td>Flow-DPPO</td><td>same</td><td>yes</td><td>SDE</td><td>near on-policy</td><td>no</td><td>same</td><td>KL-ADV mask</td><td>like Flow-GRPO</td></tr>
+    <tr><td>DiffusionNFT</td><td>scalar reward → $r\in[0,1]$</td><td>no</td><td>any ODE solver</td><td>off-policy via EMA $\theta_{\text{old}}$</td><td>no</td><td>per sample, at re-noised (not visited) states: $(2r-1)(u_t-v_{\text{old}})$</td><td>joint branches + EMA (tuned per task)</td><td>endpoints only; ~9–10 re-noised states per sample</td></tr>
+    <tr><td>ReFL</td><td>reward gradient</td><td>no</td><td>any; grad through last step</td><td>on-policy</td><td><strong>yes</strong></td><td>full gradient vector per sample</td><td>pretraining loss / few steps</td><td>VAE + reward-model backward; $K=1$</td></tr>
+    <tr><td>Diffusion-DPO</td><td>fixed preference pairs</td><td>no (denoising-error surrogate)</td><td>none (offline)</td><td>offline</td><td>no</td><td>per pair, at forward-noised states</td><td>reference model in the loss</td><td>dataset size; 2 models' forwards</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="s3-unsolved">What is left unsolved</h3>
+<p>The paper's introduction ends its survey with "Neither family is thus both efficient and stable without per-task tuning." You can now unpack that sentence into three concrete gaps, each of which one component of DiffusionART closes in Step 4.</p>
+<ol>
+  <li><strong>Reverse-process RL has the right states but the wrong signal.</strong> Flow-GRPO trains on states the sampler actually visits, which is what you want, but each state's update is a scalar advantage times its own random noise draw, through a likelihood that exists only because the sampler was made stochastic. In the paper's SD3.5-M runs, DiffusionART reaches Flow-GRPO's step-500 reward in 10.0×, 5.2× and 9.6× fewer steps on GenEval, OCR and PickScore. <em>Question for Step 4: can each visited state receive an explicit reward-improving direction instead of a scalar passed through a likelihood ratio?</em></li>
+  <li><strong>Forward-process RL has the right signal shape but the wrong states.</strong> NFT's regression target is a direction in velocity space, which is efficient, but it is built from forward-noised endpoints, implicitly assuming the sampler's field equals the forward field. That assumption hides a force that each branch carries alone and that joint training cancels only on average across samples. <em>Question: can the target be built so that this force is absent by construction, for every state?</em></li>
+  <li><strong>Stability comes from a knob that must be retuned.</strong> NFT is stable only with an EMA schedule (and a $\beta$) tuned per task: 0.5 retention for GenEval, 0.999 for OCR, untransferable to FLUX. <em>Question: what does EMA actually provide, and can it be replaced by something that adapts to each state's drift automatically?</em></li>
+</ol>
+<p>DiffusionART's answers are aggregation-first covariance guidance $G(c)$ applied to reverse-rollout states, a second MSE update whose restoring force is proportional to each state's drift, and a trust-region mask borrowed in spirit from Flow-GRPO's SDE and Flow-DPPO's mask. Every piece reuses something from this chapter.</p>
+
+<h3 id="s3-exercises">Exercises</h3>
+
+<details class="exercise"><summary>Exercise 3.1 — Derive NFT's single-target form. Starting from $\ell=r\lVert v_{\theta,+}-u_t\rVert^2+(1-r)\lVert v_{\theta,-}-u_t\rVert^2$ with $v_{\theta,\pm}=v_{\text{old}}\pm\beta(v_\theta-v_{\text{old}})$, show $\ell=\beta^2\lVert v_\theta-v_{\text{tgt}}\rVert^2+4r(1-r)\lVert u_t-v_{\text{old}}\rVert^2$ with $v_{\text{tgt}}=au_t+(1-a)v_{\text{old}}$, $a=(2r-1)/\beta$.</summary><div class="solution">
+<p>Let $d=v_\theta-v_{\text{old}}$, $h=u_t-v_{\text{old}}$, $A=2r-1$. Then $v_{\theta,+}-u_t=\beta d-h$ and $v_{\theta,-}-u_t=-\beta d-h$. Expanding,</p>
+<div class="math-block">\[ \ell=r(\beta^2\lVert d\rVert^2-2\beta\langle d,h\rangle+\lVert h\rVert^2)+(1-r)(\beta^2\lVert d\rVert^2+2\beta\langle d,h\rangle+\lVert h\rVert^2)=\beta^2\lVert d\rVert^2-2\beta A\langle d,h\rangle+\lVert h\rVert^2. \]</div>
+<p>Completing the square, $\beta^2\lVert d\rVert^2-2\beta A\langle d,h\rangle=\beta^2\lVert d-\tfrac A\beta h\rVert^2-A^2\lVert h\rVert^2$, so $\ell=\beta^2\lVert d-\tfrac A\beta h\rVert^2+(1-A^2)\lVert h\rVert^2$. Since $d-\tfrac A\beta h=v_\theta-(v_{\text{old}}+a h)=v_\theta-(au_t+(1-a)v_{\text{old}})$ and $1-A^2=(1-A)(1+A)=(2-2r)(2r)=4r(1-r)$, the claim follows. The second term does not depend on $\theta$ because $r$, $u_t$ and $v_{\text{old}}$ are frozen.</p></div></details>
+
+<details class="exercise"><summary>Exercise 3.2 — On-policy descent direction. (a) Show $-\nabla_{v_\theta}\ell|_{v_\theta=v_{\text{old}}}=2\beta(2r-1)(u_t-v_{\text{old}})$. (b) Suppose all $K$ samples of a prompt shared the same residual $h$ at some state. What is the summed force, and what does that say about which part of $h$ NFT learns from?</summary><div class="solution">
+<p>(a) From $\ell=\beta^2\lVert d\rVert^2-2\beta A\langle d,h\rangle+\lVert h\rVert^2$, $\nabla_{v_\theta}\ell=\nabla_d\ell=2\beta^2d-2\beta Ah$. At $d=0$ the negative gradient is $2\beta Ah=2\beta(2r-1)(u_t-v_{\text{old}})$.</p>
+<p>(b) The summed force is $2\beta h\sum_i(2r_i-1)$, which is zero without clipping because $\sum_i(2r_i-1)=0$. So the part of the residual that is common to all samples cancels, and only the part that co-varies with reward survives: writing $h_i=\bar h+(h_i-\bar h)$, the sum is $2\beta\sum_i(2r_i-1)(h_i-\bar h)$, a covariance between goodness and residual. This is the per-sample version of Lemma 1's $g$. The cancellation is exact only across samples; Step 4 shows what happens to a term that is not common to all samples at a given state.</p></div></details>
+
+<details class="exercise"><summary>Exercise 3.3 — GRPO by hand. A group has rewards $R=(0.9,0.5,0.3,0.7)$; use population std and $\epsilon_{\text{clip}}=0.2$. Compute the clipped surrogate for (i) a transition of sample 1 with $\rho=1.3$, (ii) a transition of sample 3 with $\rho=0.7$, (iii) a transition of sample 3 with $\rho=1.3$. Which of the three passes a gradient?</summary><div class="solution">
+<p>$\bar R=0.6$, std $=\sqrt{(0.09+0.01+0.09+0.01)/4}=\sqrt{0.05}=0.2236$, so $A=(1.342,-0.447,-1.342,0.447)$.</p>
+<ul>
+<li>(i) $A=1.342$, $\rho=1.3$: $\min(1.3\cdot1.342,\ 1.2\cdot1.342)=\min(1.745,1.610)=1.610$. The clipped branch is active, so the gradient is zero: the transition has already become more likely than the trust region allows.</li>
+<li>(ii) $A=-1.342$, $\rho=0.7$: $\min(-0.939,\ 0.8\cdot(-1.342)=-1.074)=-1.074$. Clipped again; zero gradient. The bad transition has already been made less likely enough.</li>
+<li>(iii) $A=-1.342$, $\rho=1.3$: $\min(-1.745,\ -1.610)=-1.745$. The <em>unclipped</em> branch is the minimum, so the gradient flows and pushes $\rho$ down. PPO never clips a move in the wrong direction.</li>
+</ul>
+<p>Only (iii) passes a gradient. In the repo's loss form, these values are negated: $\max(-A\rho,-A\operatorname{clip}(\rho))$.</p></div></details>
+
+<details class="exercise"><summary>Exercise 3.4 — The Gaussian transition. (a) For $x'=\mu_{\text{old}}+\sigma\xi$, show $\nabla_\mu\log\mathcal N(x';\mu,\sigma^2I)|_{\mu=\mu_{\text{old}}}=\xi/\sigma$. (b) Using the paper's reference transition, show the per-step KL between current and old policy is $\frac{h(1+\nu^2/2)^2(1-t)}{2\nu^2t}\lVert v_\theta-v_{\text{old}}\rVert^2$. How does the same velocity change cost in KL near $t=1$ versus near $t=0$?</summary><div class="solution">
+<p>(a) $\log\mathcal N=-\lVert x'-\mu\rVert^2/2\sigma^2+\text{const}$, so $\nabla_\mu=(x'-\mu)/\sigma^2$. At $\mu=\mu_{\text{old}}$, $x'-\mu=\sigma\xi$, giving $\xi/\sigma$. The update direction is the sampled noise.</p>
+<p>(b) Both transitions have variance $\sigma^2_{\text{ref}}=\nu^2th/(1-t)$, and their means differ by $h(1+\nu^2/2)(v_\theta-v_{\text{old}})$ (the $x_t$ term cancels). The KL between equal-variance Gaussians is $\lVert\Delta\mu\rVert^2/2\sigma^2$:</p>
+<div class="math-block">\[ D_{\text{KL}}=\frac{h^2(1+\nu^2/2)^2\lVert v_\theta-v_{\text{old}}\rVert^2}{2\nu^2th/(1-t)}=\frac{h(1+\nu^2/2)^2(1-t)}{2\nu^2t}\lVert v_\theta-v_{\text{old}}\rVert^2. \]</div>
+<p>The factor $(1-t)/t$ is small near $t=1$ (lots of injected noise, so a velocity change is barely detectable) and grows without bound as $t\to0$ (almost no noise, so the same change makes the observed next state very unlikely). A fixed ratio clip therefore constrains late steps much more tightly than early ones. DiffusionART's KL proxy in Step 4 is this exact quantity divided by $D$.</p></div></details>
+
+<details class="exercise"><summary>Exercise 3.5 — The repo's per-branch weights. The repo divides each branch's squared residual by its own detached weight $w_\pm&gt;0$: $\ell=r\lVert\beta d-h\rVert^2/w_++(1-r)\lVert\beta d+h\rVert^2/w_-$ (overall constants dropped). Show that this is still a single-target MSE and find the target.</summary><div class="solution">
+<p>Let $\mathsf a=r/w_+$ and $\mathsf b=(1-r)/w_-$. Expanding as in Exercise 3.1,</p>
+<div class="math-block">\[ \ell=(\mathsf a+\mathsf b)\beta^2\lVert d\rVert^2-2\beta(\mathsf a-\mathsf b)\langle d,h\rangle+(\mathsf a+\mathsf b)\lVert h\rVert^2=(\mathsf a+\mathsf b)\beta^2\Big\lVert d-\frac{A_{\text{eff}}}{\beta}h\Big\rVert^2+\text{const}, \]</div>
+<p>with $A_{\text{eff}}=(\mathsf a-\mathsf b)/(\mathsf a+\mathsf b)\in[-1,1]$. The target is $v_{\text{old}}+\tfrac{A_{\text{eff}}}{\beta}(u_t-v_{\text{old}})$: the same line, with $2r-1$ replaced by $A_{\text{eff}}$, and a per-sample loss weight $(\mathsf a+\mathsf b)\beta^2$. When $w_+=w_-$ you recover $A_{\text{eff}}=2r-1$. The check script <code>tutorial/scratch/step3/repo_nft_check.py</code> runs the repo's <code>nft_loss</code> and matches this gradient to $3.3\times10^{-16}$.</p></div></details>
+
+<div class="takeaways"><p class="callout-title">Takeaways</p><ul>
+  <li>Reverse-process methods (DDPO, Flow-GRPO and its variants) treat each denoising step as a Gaussian action, need a stochastic sampler only to have a likelihood, and push each visited state along its own sampled noise, scaled by a trajectory-level advantage.</li>
+  <li>Flow-GRPO's SDE is the ODE plus a Langevin correction $\tfrac{\sigma_t^2}{2}\nabla\log p_t$; its objective is GRPO's clipped surrogate per transition, with an optional closed-form per-step KL. Fast, Dance and DPPO change which steps are stochastic, how the SDE is parameterized, and how the trust region is enforced.</li>
+  <li>DiffusionNFT trains on forward-noised endpoints. Its positive, old and negative ideal velocities are collinear along $g=\operatorname{Cov}(r,u_t\mid s_t)$, and its loss equals $\beta^2\lVert v_\theta-v_{\text{tgt}}\rVert^2$ with $v_{\text{tgt}}=v_{\text{old}}+\tfrac{2r-1}{\beta}(u_t-v_{\text{old}})$, whose on-policy force is $2\beta(2r-1)(u_t-v_{\text{old}})$.</li>
+  <li>NFT is efficient but stable only with both branches and a lagged EMA rollout policy whose schedule (and $\beta$) must be tuned per task. Why each branch alone collapses is the puzzle Step 4 resolves.</li>
+  <li>ReFL needs reward gradients; Diffusion-DPO needs a fixed preference dataset. DiffusionART keeps online RL's "reward values only" contract.</li>
+</ul></div>
+
+<div class="reading"><p class="callout-title">Further reading</p><ul>
+  <li>Black et al., <a href="https://arxiv.org/abs/2305.13301">Training Diffusion Models with Reinforcement Learning</a> (DDPO), 2023.</li>
+  <li>Fan et al., <a href="https://arxiv.org/abs/2305.16381">DPOK: Reinforcement Learning for Fine-tuning Text-to-Image Diffusion Models</a>, 2023.</li>
+  <li>Liu et al., <a href="https://arxiv.org/abs/2505.05470">Flow-GRPO: Training Flow Matching Models via Online RL</a>, 2025. Section on ODE-to-SDE conversion.</li>
+  <li>Xue et al., <a href="https://arxiv.org/abs/2505.07818">DanceGRPO: Unleashing GRPO on Visual Generation</a>, 2025.</li>
+  <li>Wang and Yu, <a href="https://arxiv.org/abs/2509.05952">Coefficients-Preserving Sampling for Reinforcement Learning with Flow Matching</a>, 2025.</li>
+  <li>Ping et al., <a href="https://arxiv.org/abs/2606.11025">Flow-DPPO: Divergence Proximal Policy Optimization for Flow Matching Models</a>, 2026.</li>
+  <li>Zheng et al., <a href="https://arxiv.org/abs/2509.16117">DiffusionNFT: Online Diffusion Reinforcement with Forward Process</a>, 2025. Read the derivation of the implicit parameterization and the EMA ablations.</li>
+  <li>Xu et al., <a href="https://arxiv.org/abs/2304.05977">ImageReward</a> (introduces ReFL), 2023.</li>
+  <li>Wallace et al., <a href="https://arxiv.org/abs/2311.12908">Diffusion Model Alignment Using Direct Preference Optimization</a>, 2023.</li>
+  <li>The DiffusionART paper, §2 (Preliminaries), §3 and Appendices B.1–B.2 and C.1; repository <code>docs/algorithm-provenance.md</code>.</li>
+</ul></div>
+</section>

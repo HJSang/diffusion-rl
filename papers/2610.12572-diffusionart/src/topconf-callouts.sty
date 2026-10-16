@@ -1,0 +1,66 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{topconf-callouts}[2026/08/13 Insight-driven paper callouts]
+
+\RequirePackage{xcolor}
+\RequirePackage{xparse}
+\RequirePackage{tikz}
+
+\definecolor{TopConfInsightBlue}{RGB}{234,244,255}
+\definecolor{TopConfObservationOrange}{RGB}{255,241,223}
+
+\newcounter{topconfobservation}
+\newcounter{topconfinsight}
+\renewcommand{\thetopconfobservation}{\arabic{topconfobservation}}
+\renewcommand{\thetopconfinsight}{\arabic{topconfinsight}}
+
+\newlength{\TopConfCalloutTextWidth}
+
+\NewDocumentCommand{\TopConfRenderCallout}{m m m +m}{%
+  \par\smallskip\noindent
+  \begingroup
+  \setlength{\TopConfCalloutTextWidth}{\dimexpr\linewidth-14pt\relax}%
+  \begin{tikzpicture}
+    \node[
+      draw=black,
+      fill=#1,
+      line width=0.5pt,
+      rounded corners=#2,
+      inner sep=6pt,
+      outer sep=0pt
+    ]{%
+      \begin{minipage}{\TopConfCalloutTextWidth}
+        #3#4
+      \end{minipage}%
+    };
+  \end{tikzpicture}%
+  \endgroup
+  \par\smallskip
+}
+
+\NewDocumentEnvironment{observation}{o +b}{%
+  \refstepcounter{topconfobservation}%
+  \TopConfRenderCallout
+    {TopConfObservationOrange}
+    {1.5mm}
+    {\textbf{Observation~\thetopconfobservation\IfNoValueF{#1}{: #1}}\\[3pt]}
+    {#2}%
+}{}
+
+\NewDocumentEnvironment{insight}{o +b}{%
+  \refstepcounter{topconfinsight}%
+  \TopConfRenderCallout
+    {TopConfInsightBlue}
+    {1.5mm}
+    {\textbf{Insight~\thetopconfinsight\IfNoValueF{#1}{: #1}}\\[3pt]}
+    {#2}%
+}{}
+
+\NewDocumentEnvironment{keyequation}{+b}{%
+  \TopConfRenderCallout
+    {white}
+    {0pt}
+    {}
+    {#1}%
+}{}
+
+\endinput

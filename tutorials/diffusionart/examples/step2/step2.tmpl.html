@@ -1,0 +1,490 @@
+<section class="step" id="step-2" data-title="From LLM RL to diffusion RL">
+<header class="step-head">
+  <p class="eyebrow">Step 2 · about half a day</p>
+  <h2>From LLM RL to diffusion RL</h2>
+  <p class="lede">After this step you can write image or video generation as an MDP, compute the log-probability and importance ratio of a denoising step, build GRPO advantages from vision rewards, and explain why one terminal reward spread over many denoising steps gives a noisy gradient. You will also be able to place every algorithm in Step 3 into one of two families: reverse-process RL or forward-process RL.</p>
+</header>
+
+<h3 id="s2-why">Why RL for a diffusion model, and what carries over</h3>
+
+<p>Step 1 trained a velocity field $v_\theta(x_t,t,c)$ by regression. Given an endpoint $x_0$ from the dataset, a noise draw $\epsilon$ and a time $t$, the model learns to predict $u_t=x_0-\epsilon$ at the state $x_t=(1-t)x_0+t\epsilon$. That objective only asks the model to reproduce the data distribution. It contains no term for "the hands have five fingers", "the image shows exactly three red cubes", "the text on the sign reads OPEN", or "the motion is smooth". Those properties are judged by other models, such as preference models, object detectors, OCR engines and video VLMs, and the judgement is available only after a complete image or video exists.</p>
+
+<p>You already know this situation from LLM post-training. A pretrained language model imitates text, a verifier or reward model scores complete responses, and RL moves the policy toward higher-scoring responses. The DiffusionART paper studies the same setting for images and videos, specifically <em>online</em> RL with <em>black-box</em> rewards: the generator samples, a frozen reward model scores the decoded pixels, and we update the generator using only the scalar scores (the paper, §1). Two neighbouring settings are out of scope for this step. ReFL backpropagates through a differentiable reward model, and Diffusion-DPO learns from a fixed preference dataset. Step 3 places both.</p>
+
+<p>Most of your toolkit transfers directly: group sampling, advantage normalization, importance ratios, clipping, the rollout/trainer split, old and reference policies. Three things change, and each one shapes the algorithms in the rest of this tutorial.</p>
+<ol>
+  <li><strong>The action is a whole image.</strong> One "token" of the diffusion policy is the next latent, a continuous vector with tens of thousands to about a million coordinates. Densities over such vectors behave very differently from a softmax over a vocabulary.</li>
+  <li><strong>The policy has no intrinsic randomness.</strong> The standard sampler is a deterministic ODE. To have a likelihood at all, you must inject noise yourself by converting the ODE to an SDE, and you choose how much.</li>
+  <li><strong>Credit assignment is harder.</strong> An LLM response of 500 tokens also gets one terminal reward. In diffusion, however, each of the $T$ steps rewrites <em>every</em> pixel a little, and no single step owns any part of the output. The rest of this tutorial revolves around this point.</li>
+</ol>
+
+<h3 id="s2-mdp">The denoising MDP</h3>
+
+<p>Pick a time grid $1=t_0&gt;t_1&gt;\dots&gt;t_T=0$, where $T$ is the number of sampling steps. The paper uses $T=10$ for SD3.5-M, $T=6$ for FLUX.1-dev, $T=16$ for HunyuanVideo-13B and $T=4$ for the step-distilled Wan2.1-I2V-14B (the paper, §5). Index steps by $k=0,\dots,T-1$ and write $h_k=t_k-t_{k+1}&gt;0$ for the step size. The MDP is:</p>
+
+<ul>
+  <li><strong>State</strong> $s_k=(c,\,t_k,\,x_{t_k})$: the prompt, the current time, and the current latent. The state has a fixed size. It does not grow the way an LLM context grows, and it is Markov: the latent is the whole memory.</li>
+  <li><strong>Initial state</strong> $s_0=(c,1,x_1)$ with $x_1\sim\mathcal N(0,I)$. The prompt comes from the dataset; the initial noise is drawn fresh.</li>
+  <li><strong>Action</strong> $a_k=x_{t_{k+1}}$: the next latent itself.</li>
+  <li><strong>Policy</strong> $\pi_\theta(a_k\mid s_k)=p_\theta(x_{t_{k+1}}\mid x_{t_k},c)$: one sampler step. With an SDE sampler it is a Gaussian whose mean is computed from $v_\theta(x_{t_k},t_k,c)$.</li>
+  <li><strong>Transition</strong> deterministic: $s_{k+1}=(c,t_{k+1},a_k)$. The environment just copies the action into the state, exactly like appending a token.</li>
+  <li><strong>Reward</strong> sparse and terminal: $0$ at every intermediate step, and $R(x_0,c)$ after the last step, where $x_0=x_{t_T}$ is decoded by the VAE and scored by a reward model.</li>
+  <li><strong>Horizon</strong> $T$, undiscounted.</li>
+</ul>
+
+<p>The return of a trajectory $\tau=(x_1,x_{t_1},\dots,x_0)$ is just $R(x_0,c)$, and the standard policy-gradient identity applies unchanged:</p>
+<div class="math-block">\[ \nabla_\theta\,\mathbb E_{\tau\sim\pi_\theta}[R(x_0,c)] \;=\; \mathbb E_{\tau}\Big[R(x_0,c)\sum_{k=0}^{T-1}\nabla_\theta\log p_\theta(x_{t_{k+1}}\mid x_{t_k},c)\Big]. \]</div>
+<p>The initial noise $x_1$ does not appear in the sum because its density does not depend on $\theta$. Keep this in mind: $x_1$ affects the reward, but no action controls it. To the policy gradient it is pure noise.</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>In LLM RL, "action = next token, transition = append" makes the trajectory log-probability the sum of token logprobs, which the trainer recomputes in one teacher-forced forward pass. In diffusion the decomposition is identical, but each term needs its <em>own</em> forward pass of the full network at a different noisy latent. Recomputing the log-probabilities of a 10-step trajectory costs 10 transformer forwards, not one. This is why reverse-process methods usually train on a subset of the steps.</p></div>
+
+<h4>The mapping, concept by concept</h4>
+
+<div class="table-wrap"><table>
+<thead><tr><th>Concept</th><th>LLM RL (miles: SGLang + Megatron)</th><th>Diffusion RL</th><th>What changes</th></tr></thead>
+<tbody>
+<tr><td>Prompt</td><td>Text prompt</td><td>Text prompt $c$ (plus a reference image for image-to-video)</td><td>Nothing structurally.</td></tr>
+<tr><td>State</td><td>Prompt + tokens so far</td><td>$s_k=(c,t_k,x_{t_k})$</td><td>Fixed size and Markov; there is no KV cache to carry.</td></tr>
+<tr><td>Action / token</td><td>One token from a vocabulary of ~150k</td><td>Next latent $x_{t_{k+1}}\in\mathbb R^D$, $D\approx 6.6\times10^4$ (SD3 at 512²) to $\approx 9\times10^5$ (video)</td><td>Continuous and very high-dimensional.</td></tr>
+<tr><td>Policy</td><td>Softmax over logits</td><td>$\mathcal N(\mu_\theta(s_k),\,s_k^2 I)$ from an SDE step</td><td>The randomness is a design choice (noise level $\nu$). An ODE step has no density.</td></tr>
+<tr><td>Logprob</td><td>$\log\operatorname{softmax}$ at the sampled token, $\le 0$</td><td>Gaussian log-density, summed (or averaged) over $D$ coordinates</td><td>Can be positive; scales with $D$; the repo averages over coordinates.</td></tr>
+<tr><td>Response</td><td>Variable-length token sequence</td><td>Fixed-length chain $x_1\to x_{t_1}\to\dots\to x_0$, $T$ = 4–16</td><td>Short horizon, but each step edits the whole output.</td></tr>
+<tr><td>Reward model</td><td>Verifier or RM on text</td><td>PickScore, HPSv2.1, CLIPScore, GenEval, OCR, VideoReward (VQ/MQ/TA)</td><td>Needs a VAE decode first; often a separate GPU model per reward.</td></tr>
+<tr><td>Group of samples</td><td>$G$ responses per prompt</td><td>$K$ images/videos per prompt (24 for SD3 Flow-GRPO configs, 8 for video)</td><td>Same idea; $K$ is bounded by rollout cost.</td></tr>
+<tr><td>Advantage</td><td>Group-normalized reward, broadcast to all tokens</td><td>Group-normalized reward, broadcast to all $T$ transitions</td><td>Identical formula; the broadcast is much less informative (see <a href="#s2-credit">credit assignment</a>).</td></tr>
+<tr><td>KL to reference</td><td>Per-token estimator from sampled logprobs</td><td>Closed form $\lVert\mu_\theta-\mu_{\text{ref}}\rVert^2/(2s^2)$ per step</td><td>Exact and cheap; the paper's experiments use no KL term.</td></tr>
+<tr><td>Importance ratio</td><td>$\pi_\theta/\pi_{\text{old}}$ per token</td><td>Gaussian ratio per transition; depends only on the mean shift and the stored noise</td><td>Extremely sharp in high dimension.</td></tr>
+<tr><td>PPO clip</td><td>$\epsilon\approx0.2$</td><td>$\epsilon=10^{-5}$ (Flow-GRPO/Fast) or $10^{-4}$ (DanceGRPO) on a coordinate-averaged log-ratio</td><td>A different ratio and a different scale; see <a href="#s2-logprob">below</a>.</td></tr>
+<tr><td>Rollout engine vs trainer</td><td>SGLang generates; Megatron trains</td><td>Same diffusion transformer runs the sampler and the trainer, typically in one process (DDP/FSDP)</td><td>Rollout cost is $T$ full forwards + VAE decode + reward model per sample.</td></tr>
+<tr><td>Old / ref / actor</td><td>Rollout weights, frozen SFT, current weights</td><td>$\theta_{\text{old}}$ (rollout), $\theta_{\text{ref}}$ (pretrained), $\theta$</td><td>DiffusionNFT's $\theta_{\text{old}}$ is an EMA of $\theta$, so its rollouts are off-policy by design.</td></tr>
+<tr><td>On- vs off-policy</td><td>Multiple PPO epochs per rollout</td><td>e.g. 2 updates per rollout in the SD3 Flow-GRPO config; EMA rollouts in NFT</td><td>Ratios start at exactly 1 and drift; the clip watches the drift.</td></tr>
+<tr><td>Train–inference mismatch</td><td>SGLang vs Megatron logprob differences</td><td>Latent rounding (FLUX), fp16/bf16 sampler; SDE rollouts vs ODE deployment; 10 training steps vs 40 evaluation steps</td><td>You train a stochastic short-horizon policy and deploy a different sampler.</td></tr>
+</tbody></table></div>
+
+<div class="callout warn"><p class="callout-title">Pitfall</p><p>The last row deserves attention. In LLM RL you deploy the same sampler you trained. Here, reverse-process RL trains a <em>stochastic</em> sampler with a fixed short schedule, while users typically run a deterministic ODE sampler, sometimes with more steps or CFG. The SD3 configs in the repo train with 10 steps and evaluate with 40 (<code>configs/paper/image/sd3_pickscore_grpo.yaml</code>). This works because the SDE and the ODE share their marginals (Step 1), so improving one improves the other to first order, but you are not optimizing the deployed object exactly.</p></div>
+
+<h3 id="s2-logprob">The log-probability of one denoising step</h3>
+
+<h4>Why we need noise at all</h4>
+<p>The Euler ODE step from Step 1 is $x_{t-\Delta}=x_t+\Delta\,v_\theta(x_t,t,c)$. Given the state, the next latent is a deterministic function of $\theta$. Its "density" is a Dirac delta: the ratio $p_\theta/p_{\text{old}}$ is $1$ if the new parameters happen to map to the same point and undefined otherwise. You cannot run PPO on that. Likelihood-based RL therefore replaces the ODE sampler with an SDE sampler that has the same marginal distributions $p_t(x_t\mid c)$ but injects Gaussian noise at every step (Step 1 derived the family). DDPO did not need this conversion because it fine-tuned stochastic DDPM/DDIM-style samplers that already inject noise at every step. For rectified-flow models (SD3, FLUX, HunyuanVideo, Wan), Flow-GRPO introduced the conversion.</p>
+
+<h4>The Flow-GRPO SDE step, in our notation</h4>
+<p>With step size $h=t-t_{\text{next}}&gt;0$ and noise level $\nu\in(0,1]$, the paper writes the reverse transition as (the paper, Appendix "Reference Transitions for ODE Trust-Region Masking"):</p>
+<div class="math-block">\[ \mu(s_t,v)=x_t+h\Big[\big(1+\tfrac{\nu^2}{2}\big)v-\frac{\nu^2}{2(1-t)}\,x_t\Big],\qquad s^2(t)=\nu^2\,\frac{t}{1-t}\,h, \qquad 0&lt;t&lt;1. \]</div>
+<p>and $x_{t_{\text{next}}}=\mu(s_t,v_\theta(s_t))+s(t)\,\xi$ with $\xi\sim\mathcal N(0,I)$. As a sanity check, setting $\nu=0$ gives $\mu=x_t+h v$ and $s=0$: the Euler ODE step. The extra drift term $\tfrac{\nu^2}{2}(v-x_t/(1-t))$ is the score correction that keeps the marginals unchanged when noise is added.</p>
+
+<p>Here is the repo's implementation. It uses the <strong>opposite velocity sign</strong>: the model output in diffusers/SD3 is $v^{\text{repo}}=\epsilon-x_0=-v$, and the code integrates with <code>dt = sigma_next - sigma</code> $=-h&lt;0$, so its ODE step <code>x + dt * v</code> equals our $x_t+h\,v$.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/sampling.py · L94–102, L115–125</span> Flow-GRPO SDE step and its Gaussian log-probability (Dance and CPS branches omitted)</figcaption>
+  <pre><code class="language-python">@@REPO_SDE@@</code></pre>
+</figure>
+
+<p>Map it to our notation. Inside the open interval $0&lt;t&lt;1$, <code>guard = t</code>, so <code>diffusion</code>$^2=\nu^2 t/(1-t)$ and <code>diffusion</code>$^2/(2t)=\nu^2/(2(1-t))$. Substituting <code>dt</code>$=-h$ and <code>v</code>$=-v$:</p>
+<div class="math-block">\[ \texttt{mean}=x_t\Big(1-\frac{\nu^2 h}{2(1-t)}\Big)+(-v)\Big(1+\frac{\nu^2}{2}\Big)(-h) = x_t+h\Big[\big(1+\tfrac{\nu^2}{2}\big)v-\frac{\nu^2}{2(1-t)}x_t\Big], \]</div>
+<div class="math-block">\[ \texttt{std}=\nu\sqrt{\tfrac{t}{1-t}}\sqrt{h}=s(t). \]</div>
+<p>This matches the paper. At $t=1$ the formula divides by zero, and the two sources resolve it differently. The rollout code replaces $1-t$ by $1-t_{\text{next}}$ inside the guard (<code>sigma_max</code> is the schedule's second sigma). The paper's trust-region reference uses the convention $\mu=x_t+hv$, $s^2=\nu^2$ at $t=1$. Our toy below follows the rollout code.</p>
+
+<p>Two more details in the code matter. First, <code>sample</code> is either drawn (<code>innovation</code>) or supplied (<code>observed</code>). During training you <em>replay</em> a stored transition: you recompute <code>mean</code> with the current parameters and evaluate the density at the stored next latent. This is teacher forcing for diffusion. Second, the last line returns <code>logp.flatten(1).mean(1)</code>: the log-density is <strong>averaged</strong> over the $D$ coordinates, not summed. We return to this choice after deriving the ratio.</p>
+
+<h4>Deriving the log-probability and the ratio</h4>
+<p>Write $\mu_\theta=\mu(s_t,v_\theta(s_t))$ and $s=s(t)$. The transition is an isotropic Gaussian in $D$ dimensions, so</p>
+<div class="math-block">\[ \log p_\theta(x'\mid s_t) = -\frac{\lVert x'-\mu_\theta\rVert^2}{2s^2} - D\log s - \frac D2\log 2\pi . \]</div>
+<p>The variance $s^2$ depends only on the schedule and $\nu$, not on $\theta$. In the importance ratio between the current and the rollout policy, the normalizers cancel:</p>
+<div class="math-block">\[ \log\rho = \log p_\theta(x'\mid s_t)-\log p_{\text{old}}(x'\mid s_t) = \frac{\lVert x'-\mu_{\text{old}}\rVert^2-\lVert x'-\mu_\theta\rVert^2}{2s^2}. \]</div>
+<p>The stored sample was drawn from the old policy, $x'=\mu_{\text{old}}+s\,\xi$. Let $\Delta=\mu_\theta-\mu_{\text{old}}$. Then $\lVert s\xi\rVert^2-\lVert s\xi-\Delta\rVert^2 = 2s\,\xi^\top\Delta-\lVert\Delta\rVert^2$, and</p>
+<div class="math-block">\[ \boxed{\;\log\rho=\frac{\xi^\top\Delta}{s}-\frac{\lVert\Delta\rVert^2}{2s^2}\;},\qquad \Delta=\mu_\theta-\mu_{\text{old}}=h\big(1+\tfrac{\nu^2}{2}\big)\big(v_\theta(s_t)-v_{\text{old}}(s_t)\big). \]</div>
+<p>The $x_t$ term in $\mu$ is the same for both policies and cancels, so the ratio depends on the parameters only through the <strong>velocity difference</strong> at the stored state, and on the sample only through the stored noise $\xi$. Under the old policy $\xi\sim\mathcal N(0,I)$, so $\log\rho$ is exactly Gaussian:</p>
+<div class="math-block">\[ \log\rho\;\sim\;\mathcal N\!\Big(-\mathrm{KL},\;2\,\mathrm{KL}\Big),\qquad \mathrm{KL}=D_{\mathrm{KL}}(p_{\text{old}}\,\Vert\,p_\theta)=\frac{\lVert\Delta\rVert^2}{2s^2}. \]</div>
+<p>(Check: $\mathbb E[\rho]=\exp(-\mathrm{KL}+\mathrm{KL})=1$, as an importance weight must.) The same expression $\lVert\Delta\rVert^2/(2s^2)$ is the KL used by the repo's <code>transition_kl_per_sample</code> in <code>src/visual_rl/algorithms/policy.py</code> and, divided by $D$, the paper's drift proxy $m(s_t)$ in §4.3.</p>
+
+<p>The gradient follows by differentiating at $\theta=\theta_{\text{old}}$:</p>
+<div class="math-block">\[ \nabla_\theta\log p_\theta(x'\mid s_t)\Big|_{\theta_{\text{old}}}=\frac{(x'-\mu_{\text{old}})^\top}{s^2}\,\frac{\partial\mu_\theta}{\partial\theta}=\frac{h(1+\nu^2/2)}{s}\;\xi^\top\,\frac{\partial v_\theta(s_t)}{\partial\theta}. \]</div>
+<p>Read this carefully, because the credit-assignment argument rests on it. The log-probability gradient of a transition pushes the predicted velocity <em>along the noise $\xi$ that this transition happened to draw</em>, with a scalar coefficient $h(1+\nu^2/2)/s=\sqrt h\,(1+\nu^2/2)\,\nu^{-1}\sqrt{(1-t)/t}$. That coefficient grows as $t\to0$, where the injected noise is small, and as $\nu\to0$, the ODE limit, where it diverges.</p>
+
+<h4>High dimension makes the true ratio sharp</h4>
+<p>Suppose a parameter update changes every coordinate of the velocity by the same small amount, so each coordinate of $\Delta$ has magnitude $\delta s$ for a per-coordinate shift $\delta$ measured in units of the step noise. Then $\mathrm{KL}=D\delta^2/2$ and the standard deviation of $\log\rho$ is $\sqrt D\,\delta$. A shift that is invisible per coordinate becomes a large ratio once you multiply by $D$.</p>
+
+<p><strong>Worked numbers.</strong> SD3 at $512^2$ has latents of shape $16\times64\times64$, so $D=65{,}536$. Take a mid-trajectory step with $t=0.5$, $h=0.1$ (10 uniform steps) and $\nu=0.8$. Then $s=0.8\sqrt{0.5\cdot0.1/0.5}=0.253$. Let one update change each velocity coordinate by $0.01$. Then $\Delta_j=0.1\cdot1.32\cdot0.01=1.32\times10^{-3}$ and $\delta=\Delta_j/s=5.2\times10^{-3}$.</p>
+<ul>
+  <li>Summed over coordinates (the true density ratio): $\mathrm{KL}=65536\cdot(5.2\times10^{-3})^2/2=0.89$ nats, and $\log\rho\sim\mathcal N(-0.89,\,1.34^2)$. About 90% of transitions fall outside the usual PPO band $[0.8,1.2]$.</li>
+  <li>For HunyuanVideo at $480\times480$, 53 frames, the latent is about $16\times14\times60\times60\approx8.1\times10^5$ (assuming the usual 4× temporal and 8× spatial VAE compression). The same per-coordinate change gives $\mathrm{KL}\approx11$ nats per step: the new policy assigns essentially zero density to the old samples.</li>
+</ul>
+<p>We verified these numbers by Monte Carlo (<code>tutorial/scratch/step2/ratio_dim.py</code>): for $D=65{,}536$, the empirical mean and standard deviation of $\log\rho$ were $-0.92$ and $1.31$ against theory $-0.89$ and $1.34$, with an empirical clip fraction of 0.896.</p>
+
+<p>This is why the repo, following Flow-GRPO, <strong>averages</strong> the per-coordinate log-density instead of summing it. The averaged log-ratio is $\tfrac1D\log\rho\sim\mathcal N(-\delta^2/2,\ \delta^2/D)$: in our example its standard deviation is $2.0\times10^{-5}$. A clip of $0.2$ would never bind on that quantity, which is why the paper configs use <code>ratio_clip: 1.0e-05</code> (Flow-GRPO, Flow-GRPO-Fast) or <code>0.0001</code> (DanceGRPO):</p>
+
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/policy.py · L33–46</span> The clipped GRPO loss used by the reverse-process baselines</figcaption>
+  <pre><code class="language-python">@@REPO_CLIP@@</code></pre>
+</figure>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>In LLM PPO, the per-token ratio is a true probability ratio and $\epsilon=0.2$ is an intuitive trust region. Here the per-transition object being clipped is $\exp\big(\tfrac1D\log\rho\big)$, a geometric-mean ratio per coordinate. It is no longer an unbiased importance weight, and $\epsilon$ must be re-tuned on a completely different scale. Treat <code>ratio_clip</code> as a knob on "average per-coordinate log-density drift", and monitor <code>clip_fraction</code> just as you would in miles. Expect it to be much higher than in LLM RL.</p></div>
+
+<figure class="widget" id="w2-ratio">
+  <canvas id="w2-ratio-canvas" height="230" aria-label="Density of the log importance ratio with the clip band"></canvas>
+  <div class="widget-controls">
+    <label>latent dimension $D$ = <span id="w2-ratio-dval">65,536</span> <input id="w2-ratio-d" type="range" min="0" max="7" step="1" value="3"></label>
+    <label>velocity change per coordinate $|\Delta v_j|$ = <span id="w2-ratio-vval">0.01</span> <input id="w2-ratio-v" type="range" min="-4" max="-1" step="0.05" value="-2"></label>
+    <label>time $t$ = <span id="w2-ratio-tval">0.50</span> <input id="w2-ratio-t" type="range" min="0.05" max="0.95" step="0.05" value="0.5"></label>
+    <label>noise level $\nu$ = <span id="w2-ratio-nval">0.80</span> <input id="w2-ratio-n" type="range" min="0.1" max="1" step="0.05" value="0.8"></label>
+    <label>steps $T$ <input id="w2-ratio-T" type="number" min="1" max="100" value="10" style="width:4em"></label>
+    <label>reduction <select id="w2-ratio-red"><option value="sum">sum over coordinates (true ratio)</option><option value="mean">mean over coordinates (repo)</option></select></label>
+    <label>clip $\epsilon$ <input id="w2-ratio-eps" type="number" step="any" value="0.2" style="width:7em"></label>
+  </div>
+  <p id="w2-ratio-out" aria-live="polite"></p>
+  <figcaption>Distribution of $\log\rho$ for one SDE transition under the rollout policy, when the update shifts every velocity coordinate by $|\Delta v_j|$. The shaded band is the unclipped region $[\log(1-\epsilon),\log(1+\epsilon)]$. Switching the reduction to "mean" rescales the clip to $10^{-5}$, the repo's Flow-GRPO value. Try raising $D$ from 1 through the image and video latent sizes at fixed $|\Delta v_j|$, or moving $t$ toward 0.</figcaption>
+</figure>
+<script>(() => {
+  const root = document.getElementById('w2-ratio');
+  if (!root) return;
+  const q = (id) => root.querySelector('#' + id);
+  const canvas = q('w2-ratio-canvas'), ctx = canvas.getContext('2d');
+  const inputs = ['w2-ratio-d', 'w2-ratio-v', 'w2-ratio-t', 'w2-ratio-n', 'w2-ratio-T', 'w2-ratio-red', 'w2-ratio-eps'].map(q);
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const erf = (x) => { const s = Math.sign(x); x = Math.abs(x); const t = 1 / (1 + 0.3275911 * x);
+    const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x); return s * y; };
+  const Phi = (z) => 0.5 * (1 + erf(z / Math.SQRT2));
+  const fmt = (x) => (Math.abs(x) >= 1e-2 && Math.abs(x) < 1e4) ? x.toFixed(3) : x.toExponential(2);
+  const DIMS = [[1, 'toy'], [64, ''], [4096, ''], [65536, 'SD3 at 512²'], [262144, 'SD3 at 1024²'], [806400, 'HunyuanVideo 480², 53 frames'], [896000, 'Wan2.1 400×640, 53 frames'], [3225600, '4× the HunyuanVideo latent']];
+  let lastRed = 'sum';
+  function compute() {
+    const D = DIMS[+inputs[0].value][0];
+    const dv = Math.pow(10, +inputs[1].value), t = +inputs[2].value, nu = +inputs[3].value;
+    const T = Math.max(1, Math.min(100, Math.round(+inputs[4].value || 10)));
+    const red = inputs[5].value;
+    if (red !== lastRed) { inputs[6].value = red === 'sum' ? '0.2' : '0.00001'; lastRed = red; }
+    let eps = +inputs[6].value; if (!(eps > 0 && eps < 1)) eps = red === 'sum' ? 0.2 : 1e-5;
+    const h = 1 / T, s = nu * Math.sqrt(t * h / (1 - t)), dmu = h * (1 + nu * nu / 2) * dv, delta = dmu / s;
+    const kl = D * delta * delta / 2;
+    const m = red === 'sum' ? -kl : -delta * delta / 2;
+    const sd = red === 'sum' ? Math.sqrt(D) * delta : delta / Math.sqrt(D);
+    const lo = Math.log(1 - eps), hi = Math.log(1 + eps);
+    const frac = 1 - Phi((hi - m) / sd) + Phi((lo - m) / sd);
+    return { D, dv, t, nu, s, delta, kl, m, sd, lo, hi, frac, red, eps };
+  }
+  function draw() {
+    const r = compute();
+    const lab = DIMS[+inputs[0].value][1]; q('w2-ratio-dval').textContent = r.D.toLocaleString('en-US') + (lab ? ' (' + lab + ')' : '');
+    q('w2-ratio-vval').textContent = fmt(r.dv);
+    q('w2-ratio-tval').textContent = r.t.toFixed(2);
+    q('w2-ratio-nval').textContent = r.nu.toFixed(2);
+    const W = Math.max(280, root.clientWidth || 600), H = 230, dpr = window.devicePixelRatio || 1;
+    canvas.style.width = '100%'; canvas.style.height = H + 'px';
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const fg = css('--fg') || '#222', muted = css('--muted') || '#777', line = css('--line') || '#ccc', acc = css('--accent') || 'teal', bad = css('--bad') || 'crimson';
+    ctx.clearRect(0, 0, W, H);
+    const x0 = Math.min(r.m - 4 * r.sd, r.lo * 1.6), x1 = Math.max(r.m + 4 * r.sd, r.hi * 1.6);
+    const padL = 12, padR = 12, padT = 14, padB = 34;
+    const X = (x) => padL + (x - x0) / (x1 - x0) * (W - padL - padR);
+    const N = 400; let ymax = 0; const pts = [];
+    for (let i = 0; i <= N; i++) { const x = x0 + (x1 - x0) * i / N; const z = (x - r.m) / r.sd; const y = Math.exp(-0.5 * z * z); pts.push([x, y]); ymax = Math.max(ymax, y); }
+    const Y = (y) => H - padB - y / (ymax || 1) * (H - padT - padB);
+    ctx.fillStyle = acc; ctx.globalAlpha = 0.15; ctx.fillRect(X(r.lo), padT, X(r.hi) - X(r.lo), H - padT - padB); ctx.globalAlpha = 1;
+    ctx.strokeStyle = line; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(padL, H - padB); ctx.lineTo(W - padR, H - padB); ctx.stroke();
+    ctx.strokeStyle = muted; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(X(0), padT); ctx.lineTo(X(0), H - padB); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = fg; ctx.lineWidth = 2; ctx.beginPath();
+    pts.forEach(([x, y], i) => { const px = X(x), py = Y(y); if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py); }); ctx.stroke();
+    ctx.fillStyle = bad; ctx.globalAlpha = 0.25; ctx.beginPath(); ctx.moveTo(X(x0), Y(0));
+    pts.forEach(([x, y]) => { ctx.lineTo(X(x), (x < r.lo || x > r.hi) ? Y(y) : Y(0)); }); ctx.lineTo(X(x1), Y(0)); ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.fillStyle = muted; ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText(fmt(x0), padL, H - padB + 16); ctx.textAlign = 'right'; ctx.fillText(fmt(x1), W - padR, H - padB + 16);
+    ctx.textAlign = 'center'; ctx.fillText('log ρ (0 at dashed line)', W / 2, H - 6);
+    q('w2-ratio-out').textContent =
+      `s = ${fmt(r.s)}, per-coordinate shift δ = ${fmt(r.delta)}, KL per step = ${fmt(r.kl)} nats. ` +
+      `${r.red === 'sum' ? 'log ρ' : '(1/D) log ρ'} ~ N(${fmt(r.m)}, ${fmt(r.sd)}²). ` +
+      `Fraction outside the clip band (ε = ${fmt(r.eps)}): ${(100 * r.frac).toFixed(1)}%.`;
+  }
+  inputs.forEach((el) => el.addEventListener('input', draw));
+  window.addEventListener('resize', draw);
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', draw); else if (mq.addListener) mq.addListener(draw);
+  draw();
+})();</script>
+
+<h3 id="s2-rewards">Rewards for images and videos</h3>
+
+<h4>Black-box reward models</h4>
+<p>Visual rewards are produced by frozen neural scorers applied to decoded pixels. The paper and repo use the following set (adapters in <code>src/visual_rl/rewards/</code>, contracts in <code>docs/reward-contract.md</code>):</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Reward</th><th>What it measures</th><th>Output and scale</th><th>Used in the paper for</th></tr></thead>
+<tbody>
+<tr><td>PickScore</td><td>Human preference, from a CLIP-H model trained on Pick-a-Pic comparisons</td><td>Scaled text–image logit; the historical training convention divides by 26 (the repo's <code>fixed_normalized</code> space)</td><td>T2I single reward; part of the four-reward mix</td></tr>
+<tr><td>HPSv2.1</td><td>Human preference score</td><td>Scalar</td><td>Four-reward mix</td></tr>
+<tr><td>CLIPScore</td><td>Text–image alignment</td><td>Scaled CLIP logit; historical scale /30</td><td>Four-reward mix</td></tr>
+<tr><td>GenEval</td><td>Compositional correctness (object counts, colors, positions) checked by a detector</td><td>Accuracy in $[0,1]$ per prompt</td><td>T2I single reward (SD3.5-M and FLUX); four-reward mix</td></tr>
+<tr><td>OCR</td><td>Whether the quoted text in the prompt appears in the image</td><td>$1$ if the normalized target is a substring of the recognized text, else $1-\min(\text{edit distance},|y|)/|y|$</td><td>T2I single reward</td></tr>
+<tr><td>Aesthetic</td><td>LAION aesthetic predictor on CLIP L/14 features</td><td>Raw scalar</td><td>Repo example only</td></tr>
+<tr><td>VideoReward</td><td>A Qwen2-VL-based video reward model with three heads: VQ (visual quality), MQ (motion quality), TA (text alignment)</td><td>Three scalars, scored at 4 FPS on 53-frame, 8 FPS videos</td><td>T2V with TA:VQ:MQ = 7:2:1 and VQ:MQ = 1:1; I2V with VQ:MQ = 1:1</td></tr>
+</tbody></table></div>
+
+<p>Note three practical facts. Every reward requires a VAE decode from latent to pixels, then the reward model's own preprocessing (for PickScore, rounding to uint8 and PIL conversion, so it is not differentiable even in principle). The rewards live on unrelated scales: a PickScore logit is about 20 while GenEval is in $[0,1]$. Finally, they are noisy: two near-identical images can differ in score by an amount comparable to the spread within a group.</p>
+
+<h4>Scalar vs pairwise feedback</h4>
+<p>Most reward models above return a scalar per sample. Many visual preferences, however, are naturally comparative ("which of these two looks better?"). The paper's DiffusionART-Pairwise variant (the paper, §4.4) splits the $K$ samples of a prompt into $K/2$ disjoint pairs and assigns winner/loser labels $(1,0)$, or $(\tfrac12,\tfrac12)$ for a tie; these labels replace the scalar rewards in an otherwise unchanged pipeline. The repo has configs for $K=2,4,8$ (<code>configs/examples/hunyuan_pairwise_k*.yaml</code>). Group normalization, which we cover next, already discards the absolute level of the reward and keeps only the within-group ordering and spread. That is why scalar and pairwise feedback fit into the same machinery.</p>
+
+<h4>Composite rewards</h4>
+<p>To optimize several criteria at once you have two options, and the repo keeps them strictly separate (<code>docs/composite-rewards.md</code>):</p>
+<ol>
+  <li><strong>Weighted scalar.</strong> Normalize each component with fixed statistics, $(R^{(j)}-m_j)/\sigma_j$, then form $R=\sum_j w_j\,\tilde R^{(j)}$ with literal weights. The paper's video runs use this with VideoReward heads (TA:VQ:MQ = 7:2:1, or VQ:MQ = 1:1).</li>
+  <li><strong>Per-component advantages.</strong> Group-normalize each component separately, then combine the advantages with positive weights divided by their sum: $A_i=\sum_j \tfrac{w_j}{\sum_l w_l}\,A_i^{(j)}$. The paper's four-reward T2I experiment (GenEval, PickScore, CLIPScore, HPSv2.1) uses this, without renormalizing the combination (<code>renormalize_combined: false</code>; <code>src/visual_rl/training/multi_reward.py</code>, <code>combined_group_advantages</code>).</li>
+</ol>
+<p>The second option makes every component contribute on the same footing regardless of its native scale or spread. The first lets a high-variance component dominate the group statistics.</p>
+
+<div class="callout warn"><p class="callout-title">Pitfall: reward hacking</p><p>The paper does not catalogue reward hacking, so the examples here come from general practice with these scorers rather than from its experiments. Each reward model has blind spots that RL will find: preference and aesthetic models can reward over-saturated, high-contrast, over-smoothed "AI look" images; an OCR reward with a substring rule is satisfied by huge text that ignores the rest of the prompt; detector-based GenEval can be satisfied by unnatural layouts that make objects easy to detect; a motion-quality head can prefer nearly static videos if they look clean. The defences mirror LLM RL: combine complementary rewards (the paper's video runs keep TA at weight 7 to preserve prompt following), evaluate with held-out metrics and visual inspection, and optionally add a KL term to a reference policy, which is exact and cheap for Gaussian transitions.</p></div>
+
+<h3 id="s2-grpo">Group normalization for K images per prompt</h3>
+
+<p>For one prompt $c$, sample $K$ endpoints and score them: $R_1,\dots,R_K$. The GRPO advantage is the z-score within the group:</p>
+<div class="math-block">\[ A_i=\frac{R_i-\bar R_c}{\operatorname{std}_c(R)+\varepsilon},\qquad \bar R_c=\frac1K\sum_{i=1}^K R_i . \]</div>
+<p>As in LLM GRPO, centering by the group mean is a per-prompt baseline: it removes the prompt's difficulty, which does not depend on the policy's choice among samples, without needing a value network. Dividing by the spread makes the step size comparable across prompts and reward models. The repo implements several variants that you must not confuse:</p>
+<ul>
+  <li><code>group_sample_std</code>: per-prompt unbiased std (<code>src/visual_rl/training/objectives.py</code>, <code>group_advantages</code>).</li>
+  <li>Per-prompt centering, but division by the <em>global</em> population std of the whole rollout batch plus $10^{-4}$ (<code>src/visual_rl/training/image_contracts.py</code>, <code>prompt_advantages</code>). This is what the SD3 Flow-GRPO path uses.</li>
+  <li>Per-component population std, combined with weights, for multi-reward runs (above).</li>
+</ul>
+
+<p><strong>Worked example, $K=4$.</strong> Four PickScore logits for one prompt: $R=(22.1,\,21.4,\,22.8,\,21.7)$.</p>
+<ol>
+  <li>Mean: $\bar R=88.0/4=22.0$. Deviations: $(0.1,\,-0.6,\,0.8,\,-0.3)$; sum of squares $=0.01+0.36+0.64+0.09=1.10$.</li>
+  <li>Sample std (divide by $K-1=3$): $\sqrt{1.10/3}=0.6055$. Advantages: $(0.165,\,-0.991,\,1.321,\,-0.495)$.</li>
+  <li>Population std (divide by $K=4$): $\sqrt{1.10/4}=0.5244$. Advantages: $(0.191,\,-1.144,\,1.525,\,-0.572)$.</li>
+  <li>Global std: if the std of all rewards in the rollout batch (all prompts) were $1.5$, the advantages would be $(0.067,\,-0.400,\,0.533,\,-0.200)$. This prompt has a smaller spread than the batch, so it gets a smaller step.</li>
+</ol>
+<p>Now a nearly tied group: $R=(22.10,\,22.11,\,22.09,\,22.10)$. The per-group sample std is $0.0082$, and the advantages become $(0,\,1.21,\,-1.21,\,0)$. A difference of $0.01$ logits, well inside the reward model's noise, receives the same push as the clear $0.8$ difference above. With a global std of $1.5$ it would get $\pm0.0067$ instead. This is the main reason the global-std variant exists. An exact tie gives zero advantage, and the Flow-GRPO config filters such groups (<code>zero_advantage_mode: filter_pad</code>).</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>With 0/1 verifier rewards in LLM RL, an all-correct or all-wrong group has zero advantage and is dropped, the same "dynamic sampling" logic as <code>filter_pad</code>. Visual rewards are continuous, so groups are almost never exactly tied, yet they are often <em>effectively</em> tied. Per-group std normalization then amplifies reward-model noise into full-size advantages. If your reward curve is flat but gradient norms look healthy, check this first.</p></div>
+
+<div class="callout warn"><p class="callout-title">Pitfall</p><p>The $\varepsilon$ in the denominator has units. <code>docs/composite-rewards.md</code> points out that $(R/26-\overline{R/26})/(\operatorname{std}(R/26)+\varepsilon)$ is not the same as the unscaled version. For our tied group with $\varepsilon=10^{-4}$ and population std, the advantages are $\pm1.39$ on raw logits but $\pm1.03$ after dividing by 26. Keep the reward scale fixed when you compare runs.</p></div>
+
+<h3 id="s2-toy">A complete toy: rollout, log-probs, advantages, one update</h3>
+
+<p>The next two blocks form one runnable file. A tiny MLP velocity model is pretrained by flow matching on a 2-D distribution with two blobs at $(\pm2,0)$. It is then treated as a policy. Each "prompt" $c\in\{-1,+1\}$ asks the endpoint to land on its side, with reward $R=c\cdot x_0^{(1)}$. The model is fed $c$ but was pretrained without any dependence on it, so before RL it lands on either side with roughly equal probability. Everything else is the real reverse-process pipeline in miniature: SDE rollout with the repo's mean and std (in contract sign), per-step log-probs, replay, GRPO advantages, per-transition gradients and one clipped update.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Part 1: pretrain a velocity model, then roll out SDE trajectories and record per-step log-probs</figcaption>
+  <pre><code class="language-python">@@CODE_TOY1@@</code></pre>
+</figure>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Part 2: GRPO advantages, replayed log-probs, per-transition gradient statistics and one clipped update</figcaption>
+  <pre><code class="language-python">@@CODE_TOY2@@</code></pre>
+</figure>
+
+<figure class="code">
+  <figcaption><span class="tag">output</span> Real output of <code>tutorial/scratch/step2/toy_mdp.py</code> (torch 2.14, CPU, seed 0)</figcaption>
+  <pre><code class="language-text">@@OUT_TOY@@</code></pre>
+</figure>
+
+<p>What to read from the output:</p>
+<ul>
+  <li><strong>Log-probs are not bounded by zero.</strong> Trajectory 0's per-step log-probs range from $-4.65$ to $+2.26$. As $t\to0$ the step std shrinks from 0.80 to 0.084, the density peaks, and the log-density becomes positive. Never write "logprob ≤ 0" assertions in a diffusion trainer.</li>
+  <li><strong>Replay is exact.</strong> Recomputing every transition with unchanged weights gives a ratio of exactly 1.0, which is the diffusion analogue of checking that the trainer reproduces rollout logprobs. In the real pipeline, latent rounding (FLUX) or a different precision breaks this, and the repo documents it: initial ratios "need not" be exactly one (<code>src/visual_rl/training/rollout.py</code>, L64–67).</li>
+  <li><strong>Group normalization ignores absolute quality.</strong> The first prompt ($c=-1$) got four samples on the wrong side, with rewards from $-1.65$ to $-2.45$, yet it receives advantages up to $+1.01$, decided by how close to $x=0$ each sample landed. The second prompt has three good samples and one bad one. Its bad sample gets $-1.49$, and its good samples get only $+0.37$ to $+0.63$.</li>
+  <li><strong>Per-transition gradients mostly cancel.</strong> The average norm of a single transition's gradient $A_i\nabla\log p$ is 3.47, while the norm of their mean is 0.78. The per-step signal-to-noise ratio across the 8 trajectories is 0.2–0.4. Most of each transition's gradient is its own noise $\xi$, as derived above.</li>
+  <li><strong>Ratios drift most at low noise.</strong> After one SGD step, the ratio range grows from $[0.9999,1.0002]$ at $t=1$ to $[0.9935,1.0064]$ at $t=0.1$. The coefficient $\sqrt{(1-t)/t}$ in the score makes late steps the most sensitive. The toy has $D=2$; at $D=65{,}536$ the same per-coordinate drift multiplies the log-ratio spread by $\sqrt{32768}\approx181$.</li>
+</ul>
+
+<h3 id="s2-credit">The credit-assignment problem, quantified</h3>
+
+<p>The paper's introduction identifies the core inefficiency of reverse-process RL. Its policy gradient updates each transition along its own sampling noise, "weighted by a trajectory-level advantage that this transition only partly determines" (the paper, §1). We now make that statement quantitative.</p>
+
+<h4>A linear-Gaussian picture</h4>
+<p>Fix a prompt. The endpoint is a function of the initial noise and all the injected noises, $x_0=F(x_1,\xi_0,\dots,\xi_{T-1})$. Linearize the reward around its mean:</p>
+<div class="math-block">\[ R\approx\bar R+a^\top x_1+\sum_{k=0}^{T-1}b_k^\top\xi_k,\qquad \operatorname{Var}(R)=\lVert a\rVert^2+\sum_k\lVert b_k\rVert^2 . \]</div>
+<p>Take the advantage $A=(R-\bar R)/\sigma_R$. The per-transition estimator is $\hat g_k=A\,\xi_k$, up to the scalar $h(1+\nu^2/2)/s$ and the Jacobian $\partial v/\partial\theta$, which do not change the signal-to-noise ratio. By Stein's lemma, $\mathbb E[f(\xi)\xi]=\mathbb E[\nabla_\xi f(\xi)]$ for $\xi\sim\mathcal N(0,I)$, so</p>
+<div class="math-block">\[ \mathbb E[\hat g_k]=\frac{b_k}{\sigma_R},\qquad \operatorname{tr}\operatorname{Cov}(\hat g_k)\approx\mathbb E[A^2]\,\mathbb E\lVert\xi_k\rVert^2=D. \]</div>
+<p>If the $T$ steps contribute equally to the part of the reward variance that the initial noise does not explain, $\lVert b_k\rVert^2=(1-f)\sigma_R^2/T$ with $f=\lVert a\rVert^2/\sigma_R^2$, and</p>
+<div class="math-block">\[ \mathrm{SNR}_k=\frac{\lVert\mathbb E\hat g_k\rVert}{\sqrt{\operatorname{tr}\operatorname{Cov}\hat g_k}}\approx\sqrt{\frac{1-f}{T\,D}} . \]</div>
+<p>Each transition receives a signal that shrinks as $1/\sqrt T$ (it owns only $1/T$ of the variance), carried on a noise vector whose energy grows with $D$ (it is pushed along all $D$ coordinates of its own $\xi_k$). The fraction $f$ explained by the initial noise is lost entirely, because no action controls $x_1$. Summing over $T$ transitions recovers some signal, but the low-noise steps near $t=0$ carry large score coefficients $\propto\sqrt{(1-t)/t}$ and add disproportionate variance.</p>
+
+<h4>The toy measurement</h4>
+<p>To measure this without approximations, use data $x_0\sim\mathcal N(0,I)$ in $D=4$ dimensions. The exact velocity is then known in closed form: $v^\star(x,t)=\mathbb E[x_0-\epsilon\mid x_t=x]=\frac{1-2t}{(1-t)^2+t^2}\,x$. Let the policy be $v^\star+\theta$ with a learnable bias $\theta\in\mathbb R^4$, and let the reward be $R=x_0^{(1)}$. Because the rollout is reparameterized, autograd through the sampler gives the true gradient $\nabla_\theta\mathbb E[R]$, against which we compare the GRPO-style estimator for $T=1,\dots,50$, with $\nu=0.8$ and groups of $K=8$.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Gradient SNR of the reverse-process estimator as a function of the number of steps $T$</figcaption>
+  <pre><code class="language-python">@@CODE_SNR@@</code></pre>
+</figure>
+
+<figure class="code">
+  <figcaption><span class="tag">output</span> Real output of <code>tutorial/scratch/step2/snr_vs_T.py</code> (40,000 trajectories per row)</figcaption>
+  <pre><code class="language-text">@@OUT_SNR@@</code></pre>
+</figure>
+
+<p>Interpretation, column by column:</p>
+<ul>
+  <li><strong>The estimator is unbiased in direction.</strong> Averaged over 5,000 groups, it points exactly along the true gradient (cosine 1.000). The problem is its variance, not its bias.</li>
+  <li><strong>Single-transition SNR falls as $1/\sqrt T$.</strong> From $T=1$ to $T=50$ it drops from 0.40 to 0.058, a factor of 6.9; $\sqrt{50}=7.07$. The formula $\sqrt{(1-f)/(TD)}$ predicts 0.46, 0.16 and 0.070 for $T=1,10,50$ against the measured 0.40, 0.13 and 0.058. The steps do not contribute exactly equally, so the agreement is approximate.</li>
+  <li><strong>A whole group still gets worse with $T$.</strong> Even summing all $K\cdot T$ transitions, SNR falls from 1.25 to 0.57. Finer schedules add low-noise steps near $t=0$ whose large score coefficients add variance faster than signal. In a real trainer each transition costs a full forward and backward pass, so the SNR per unit of compute falls much faster still.</li>
+  <li><strong>The initial noise explains little here.</strong> With $\nu=0.8$ the injected noise dominates (in this toy $x_1$ explains 2–14% of $\operatorname{Var}R$). With a smaller $\nu$, closer to the ODE, $f$ grows: more of the reward is decided by $x_1$, which no action controls, and the transitions are left with less signal to share. Reducing $\nu$ to make rollouts "more like deployment" therefore costs gradient signal.</li>
+  <li><strong>An endpoint-level direction does not degrade.</strong> The last column estimates the reward–endpoint covariance $\overline{\operatorname{Cov}}(R,x_0)$ from each group of 8 endpoints. Its SNR stays at about 1.18 for every $T$, because it never looks at individual transitions. Here $\theta$ is a velocity bias, so parameter and output space coincide and the two columns are comparable. This is a preview: aggregating the group <em>before</em> assigning credit to states is the idea behind DiffusionART's guidance $G(c)$ (the paper, §4.1), which Step 4 develops.</li>
+</ul>
+
+<div class="callout insight"><p class="callout-title">Key idea</p><p>Reverse-process RL asks each of the $T$ transitions to discover, from its own random noise vector, which part of a single trajectory-level scalar it was responsible for. In $D$ dimensions with $T$ steps, each transition's share of the signal is about $1/\sqrt{TD}$ of its gradient. More steps, more pixels and less injected noise all make this worse. LLM RL has the same structure, with a scalar reward spread over tokens, but each token is a discrete choice whose effect on the reward is often large and localized. A denoising step is a tiny, global, continuous nudge.</p></div>
+
+<h3 id="s2-families">Two families: reverse-process and forward-process RL</h3>
+
+<figure class="diagram">
+  <svg viewBox="0 0 800 330" role="img" aria-label="Left: reverse-process RL updates each sampled transition of a trajectory from noise x1 to endpoint x0 with the broadcast advantage. Right: forward-process RL re-noises the endpoint x0 to a fresh state xt and regresses the velocity toward a reward-weighted target.">
+    <defs>
+      <marker id="s2-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--fg)"/></marker>
+      <marker id="s2-arr-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent)"/></marker>
+      <marker id="s2-arr-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/></marker>
+    </defs>
+    <line x1="392" y1="12" x2="392" y2="318" style="stroke:var(--line);stroke-width:1"/>
+    <text x="16" y="26" style="fill:var(--fg);font-size:14px;font-weight:600">Reverse-process RL (DDPO, Flow-GRPO, DanceGRPO)</text>
+    <text x="16" y="44" style="fill:var(--muted);font-size:12px">SDE rollout; update every sampled transition</text>
+    <g style="font-size:13px">
+      <circle cx="40" cy="120" r="18" style="fill:var(--surface);stroke:var(--fg)"/><text x="40" y="125" text-anchor="middle" style="fill:var(--fg)">x₁</text>
+      <circle cx="120" cy="120" r="18" style="fill:var(--surface);stroke:var(--fg)"/><text x="120" y="125" text-anchor="middle" style="fill:var(--fg)">xₜ₁</text>
+      <circle cx="200" cy="120" r="18" style="fill:var(--surface);stroke:var(--fg)"/><text x="200" y="125" text-anchor="middle" style="fill:var(--fg)">xₜ₂</text>
+      <circle cx="280" cy="120" r="18" style="fill:var(--surface);stroke:var(--fg)"/><text x="280" y="125" text-anchor="middle" style="fill:var(--fg)">x₀</text>
+      <path d="M58,120 q10,-14 20,0 t20,0 t2,0" style="stroke:var(--fg);fill:none" marker-end="url(#s2-arr)"/>
+      <path d="M138,120 q10,-14 20,0 t20,0 t2,0" style="stroke:var(--fg);fill:none" marker-end="url(#s2-arr)"/>
+      <path d="M218,120 q10,-14 20,0 t20,0 t2,0" style="stroke:var(--fg);fill:none" marker-end="url(#s2-arr)"/>
+      <text x="80" y="96" text-anchor="middle" style="fill:var(--muted);font-size:12px">+ s·ξ₀</text>
+      <text x="160" y="96" text-anchor="middle" style="fill:var(--muted);font-size:12px">+ s·ξ₁</text>
+      <text x="240" y="96" text-anchor="middle" style="fill:var(--muted);font-size:12px">+ s·ξ₂</text>
+      <rect x="312" y="104" width="68" height="32" rx="5" style="fill:var(--surface);stroke:var(--fg)"/>
+      <text x="346" y="125" text-anchor="middle" style="fill:var(--fg)">R → Aᵢ</text>
+      <line x1="298" y1="120" x2="310" y2="120" style="stroke:var(--fg)" marker-end="url(#s2-arr)"/>
+      <path d="M346,138 L346,250 L80,250" style="stroke:var(--muted);fill:none;stroke-dasharray:4 4"/>
+      <line x1="80" y1="250" x2="80" y2="148" style="stroke:var(--accent);stroke-width:2" marker-end="url(#s2-arr-acc)"/>
+      <line x1="160" y1="250" x2="160" y2="148" style="stroke:var(--accent);stroke-width:2" marker-end="url(#s2-arr-acc)"/>
+      <line x1="240" y1="250" x2="240" y2="148" style="stroke:var(--accent);stroke-width:2" marker-end="url(#s2-arr-acc)"/>
+      <text x="196" y="272" text-anchor="middle" style="fill:var(--fg);font-size:12px">same Aᵢ at every step: Aᵢ · ∇log p(xₖ₊₁ | xₖ)</text>
+      <text x="196" y="290" text-anchor="middle" style="fill:var(--muted);font-size:12px">each push points along that step's own noise ξₖ</text>
+      <text x="196" y="308" text-anchor="middle" style="fill:var(--muted);font-size:12px">needs: SDE, likelihood, stored trajectory</text>
+    </g>
+    <text x="408" y="26" style="fill:var(--fg);font-size:14px;font-weight:600">Forward-process RL (DiffusionNFT)</text>
+    <text x="408" y="44" style="fill:var(--muted);font-size:12px">any sampler; keep only endpoints</text>
+    <g style="font-size:13px">
+      <circle cx="430" cy="100" r="18" style="fill:var(--surface);stroke:var(--fg)"/><text x="430" y="105" text-anchor="middle" style="fill:var(--fg)">x₁</text>
+      <circle cx="680" cy="100" r="18" style="fill:var(--surface);stroke:var(--fg)"/><text x="680" y="105" text-anchor="middle" style="fill:var(--fg)">x₀</text>
+      <path d="M448,100 C520,70 590,70 662,100" style="stroke:var(--muted);fill:none;stroke-dasharray:3 4" marker-end="url(#s2-arr-mut)"/>
+      <text x="555" y="70" text-anchor="middle" style="fill:var(--muted);font-size:12px">ODE / any solver (not stored)</text>
+      <rect x="712" y="84" width="58" height="32" rx="5" style="fill:var(--surface);stroke:var(--fg)"/>
+      <text x="741" y="105" text-anchor="middle" style="fill:var(--fg)">R → r</text>
+      <line x1="698" y1="100" x2="710" y2="100" style="stroke:var(--fg)" marker-end="url(#s2-arr)"/>
+      <circle cx="560" cy="210" r="18" style="fill:var(--surface);stroke:var(--fg)"/><text x="560" y="215" text-anchor="middle" style="fill:var(--fg)">xₜ</text>
+      <path d="M668,114 L576,196" style="stroke:var(--fg);fill:none" marker-end="url(#s2-arr)"/>
+      <text x="652" y="150" style="fill:var(--fg);font-size:12px">re-noise:</text>
+      <text x="652" y="166" style="fill:var(--fg);font-size:12px">xₜ = (1−t)x₀ + tε</text>
+      <text x="652" y="186" style="fill:var(--muted);font-size:12px">fresh t and ε;</text>
+      <text x="652" y="202" style="fill:var(--muted);font-size:12px">not a visited state</text>
+      <line x1="542" y1="210" x2="450" y2="210" style="stroke:var(--accent);stroke-width:2" marker-end="url(#s2-arr-acc)"/>
+      <text x="448" y="236" style="fill:var(--fg);font-size:12px">regress v_θ(xₜ) toward a</text>
+      <text x="448" y="252" style="fill:var(--fg);font-size:12px">reward-weighted target built</text>
+      <text x="448" y="268" style="fill:var(--fg);font-size:12px">from uₜ = x₀ − ε and v_old</text>
+      <text x="586" y="290" text-anchor="middle" style="fill:var(--muted);font-size:12px">needs: no likelihood; but ± branches + EMA rollout policy</text>
+    </g>
+  </svg>
+  <figcaption>Two ways to turn endpoint rewards into updates. Teal arrows are the reward-driven updates. Left: the advantage of the whole trajectory is broadcast to every sampled transition, and each transition is pushed along its own noise. Right: only the endpoint is kept; it is re-noised to a fresh state, and the velocity there is regressed toward a target that depends on the endpoint's reward.</figcaption>
+</figure>
+
+<h4>Reverse-process RL</h4>
+<p>Reverse-process RL takes the MDP literally. Roll out with an SDE so that each transition has a density, store the trajectory, group-normalize the terminal rewards, and apply clipped PPO to every selected transition (the paper, Appendix "Reverse-Process Policy Optimization"):</p>
+<div class="math-block">\[ \mathcal J_{\mathrm{FG}}=\mathbb E_{i,k}\Big[\min\big(\rho_{i,k}A_i,\ \operatorname{clip}(\rho_{i,k},1-\epsilon_{\text{clip}},1+\epsilon_{\text{clip}})A_i\big)-\lambda_{\mathrm{KL}}D_{\mathrm{KL}}\big(p_\theta(\cdot\mid x_k^{(i)},c)\,\Vert\,p_{\text{ref}}(\cdot\mid x_k^{(i)},c)\big)\Big]. \]</div>
+<p>Its strength is that it trains on states the generator actually visits, with a principled trust region. Its weakness is everything this step derived: it needs the ODE→SDE conversion, it needs stored trajectories and replay, its ratios are extremely sharp, and its per-transition gradient has poor credit assignment. DDPO, Flow-GRPO, DanceGRPO, Flow-GRPO-Fast (CPS) and Flow-DPPO all belong here. They differ in which steps are stochastic, how the SDE is parameterized, and how the trust region is enforced (Step 3).</p>
+
+<h4>Forward-process RL</h4>
+<p>Forward-process RL never computes a transition likelihood. It samples endpoints with any solver, including a fast deterministic ODE solver, and keeps only the endpoints and rewards. It then reuses the pretraining recipe: pick a fresh $t$ and $\epsilon$, form $x_t=(1-t)x_0+t\epsilon$, and regress $v_\theta(x_t)$ toward a target that leans toward $u_t=x_0-\epsilon$ for high-reward endpoints and away from it for low-reward ones. In DiffusionNFT the target is $v_{\text{tgt}}=a\,u_t+(1-a)\,v_{\text{old}}$ with $a=(2r-1)/\beta$ and $r\in[0,1]$ a clipped, centred reward (the paper, §2). This is supervised learning with reward weights, which is efficient and stable per step, and it needs no SDE. The catch, which the paper diagnoses in §3, is that the states $x_t$ are forward-noised endpoints, not states the sampler visits. The resulting mismatch forces DiffusionNFT to rely on joint positive–negative training and an EMA rollout policy whose lag must be tuned per task.</p>
+
+<h4>Preview of the trade-off</h4>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>Reverse-process (Flow-GRPO family)</th><th>Forward-process (DiffusionNFT)</th><th>DiffusionART (Step 4)</th></tr></thead>
+<tbody>
+<tr><td>Rollout sampler</td><td>SDE (at least on trained steps)</td><td>Any (ODE, DPM-Solver)</td><td>ODE</td></tr>
+<tr><td>Transition likelihood</td><td>Required</td><td>Not needed</td><td>Not needed (a Gaussian KL proxy is used only for masking)</td></tr>
+<tr><td>States trained on</td><td>Visited reverse states</td><td>Re-noised endpoints</td><td>Visited reverse states</td></tr>
+<tr><td>Per-state signal</td><td>Scalar $A_i$ along the step's own noise</td><td>Reward-weighted velocity target</td><td>Shared direction $G(c)$ aggregated from the group</td></tr>
+<tr><td>Efficiency (paper's experiments)</td><td>Low</td><td>High</td><td>High</td></tr>
+<tr><td>Stabilizer</td><td>Tight ratio clip</td><td>± branches + tuned EMA</td><td>Two-update restoration + trust-region mask</td></tr>
+<tr><td>Per-task tuning</td><td>Clip, noise level, step selection</td><td>EMA schedule, $\beta$</td><td>Fixed defaults ($\nu=0.8$, $\delta=10^{-5}$)</td></tr>
+</tbody></table></div>
+<p>Step 3 works through each baseline's objective. Step 4 shows how DiffusionART takes the reverse-process states and the forward-process regression, replaces the per-transition scalar with the group-aggregated direction from our last SNR column, and replaces EMA with a drift-adaptive restoration.</p>
+
+<h3 id="s2-systems">The systems view</h3>
+
+<h4>Where the rollout time goes</h4>
+<p>One rollout sample costs $T$ forward passes of the diffusion transformer (doubled if you use CFG; the paper trains without CFG, on CFG-distilled video models, or with FLUX's built-in guidance embedding), one VAE decode, and one or more reward-model forwards. There is no KV cache and no prefix sharing: every step processes the full latent. For video, the VAE decode of 53 frames and a VLM reward (VideoReward is scored batch-one at 4 FPS) are substantial costs of their own. This is why $K$ is modest (8 for video) and why GPU-hours, not steps, are the paper's headline metric: for example, VQ 5.5 on HunyuanVideo took 63.4 GPU hours with DiffusionART versus 1,401.4 with DiffusionNFT (EMA) (the paper, §5.2).</p>
+
+<h4>Memory of stored trajectories</h4>
+<p>Reverse-process training replays transitions, so the rollout must keep, for every selected step, the state, the next state and the old log-prob, and in practice also the old mean and old velocity (<code>Rollout</code> in <code>src/visual_rl/training/rollout.py</code>; caches are detached FP32 CPU copies). A back-of-envelope estimate with four latent-sized FP32 tensors per cached step:</p>
+<ul>
+  <li>SD3 at $512^2$: $D=65{,}536$, 256 KiB per tensor, 9 selected steps, so 9 MiB per trajectory. The SD3 Flow-GRPO config samples $48\times24=1{,}152$ trajectories per rollout, about 10 GiB.</li>
+  <li>HunyuanVideo, $D\approx8.1\times10^5$, 3.1 MiB per tensor, all 16 steps cached: 197 MiB per trajectory; 256 videos per rollout, about 49 GiB.</li>
+</ul>
+<p>Forward-process methods store only endpoints ($1/(4\times\text{steps})$ of that), but pay an extra forward pass of the old policy at each re-noised state, and keep an extra copy of the trainable weights as the EMA rollout policy (<code>src/visual_rl/training/nft.py</code>, <code>PolicyShadow</code>).</p>
+
+<h4>Why ODE rollouts can reuse cached velocities</h4>
+<p>During an ODE rollout the sampler computes $v_{\text{old}}(s_{t_k})$ at every visited state anyway, because that is how it takes the step. If the training objective is defined on those same states and only needs $v_{\text{old}}$ there, which is the case for DiffusionART's target $v_{\text{old}}+G(c)$, then the rollout's outputs <em>are</em> the old-policy predictions. No extra old-policy forward pass, no likelihood and no stored noise are needed, and the deterministic sampler makes the cached states reproducible from $x_1$. The repo's rollout cache says so explicitly: no extra sampling call is used to compute old-policy predictions on trajectory states, and re-noised NFT states need a different API (<code>src/visual_rl/training/rollout.py</code>, L58–62). Forward-process methods cannot reuse the cache, because their training states $x_t$ are new points that the sampler never visited.</p>
+
+<h4>Microbatches and the unit of work</h4>
+<p>The training unit in a diffusion trainer is a (trajectory, step) pair, not a sequence. Each pair is one full forward and backward pass at a single noisy latent, and pairs from different steps of the same trajectory are independent items that can be shuffled into different microbatches (<code>shuffle_rows: true</code> in the SD3 configs). The number of passes per update is therefore $(\text{prompts})\times K\times(\text{selected steps})$. The main cost lever is selecting fewer steps: Flow-GRPO-Fast and DanceGRPO train on a subset, while full Flow-GRPO uses 9 of 10. There is no padding or packing problem, since every item has the same shape. Rollout microbatching must be invariant to the physical batch size, so the repo draws all innovations for a logical batch before any model call (<code>src/visual_rl/training/grpo_sampling.py</code>, docstring).</p>
+
+<h4>LoRA vs full fine-tuning</h4>
+<p>The paper's image experiments train LoRA adapters (rank 32, $\alpha=64$, learning rate $3\times10^{-4}$); the video experiments fine-tune all parameters of 13–14B models at $10^{-5}$ (the paper, §5). LoRA makes the auxiliary policies cheap: the reference policy is the base model with adapters disabled, and an old or EMA policy is a copy of the adapter only. With full fine-tuning, every extra policy is another full copy of the weights to shard, so a method that needs no EMA policy and no separate old-policy forward saves real memory and time at video scale.</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>In miles, the expensive part of rollout is autoregressive decoding in SGLang, and the trainer recomputes logprobs in one packed forward. In diffusion RL, generation is a short loop of full-size forwards, and the trainer's cost scales with the number of <em>steps</em> you train on, each a full forward and backward at a different noise level. The weight-sync problem between engine and trainer largely disappears, because the same module usually runs both. The train–inference mismatch problem remains, in a new form: sampler precision, latent rounding, and SDE-vs-ODE sampling.</p></div>
+
+<h3 id="s2-pitfalls">Pitfalls checklist</h3>
+<ul>
+  <li><strong>Velocity sign.</strong> Diffusers/SD3 code predicts $\epsilon-x_0$ and steps with a negative <code>dt</code>. Our notation predicts $x_0-\epsilon$ and steps with $+h$. Mixing the two flips the score-correction term and silently produces wrong log-probs.</li>
+  <li><strong>Sum vs mean log-prob.</strong> The repo averages over coordinates. A clip value copied from LLM RL (0.2) never binds on that quantity, and a clip value copied from the repo ($10^{-5}$) clips almost everything if you sum.</li>
+  <li><strong>Terminal and initial steps.</strong> $s^2\propto t/(1-t)$ diverges at $t=1$, and the score coefficient diverges as $t\to0$. Use the repo's guard at $t=1$, and watch ratio statistics on the last steps.</li>
+  <li><strong>Replay must reuse the stored next latent.</strong> Re-drawing the noise during training gives a different action and a meaningless ratio. The repo enforces "exactly one of innovation or observed".</li>
+  <li><strong>Near-tied groups.</strong> Per-group std normalization turns reward-model noise into unit-size advantages. Prefer global std, or monitor the within-group reward spread.</li>
+  <li><strong>Reward units.</strong> A fixed divisor (PickScore /26) changes the effect of $\varepsilon$ and the meaning of logged rewards. Label plots with the score space.</li>
+</ul>
+
+<h3 id="s2-exercises">Exercises</h3>
+
+<details class="exercise"><summary>Exercise 2.1 — Derive the distribution of the Gaussian log-ratio</summary><div class="solution">
+<p>Let $p_{\text{old}}=\mathcal N(\mu_{\text{old}},s^2I)$ and $p_\theta=\mathcal N(\mu_\theta,s^2I)$ in $D$ dimensions, and let $x'\sim p_{\text{old}}$. Show that $\log\rho=\log p_\theta(x')-\log p_{\text{old}}(x')\sim\mathcal N(-\mathrm{KL},2\mathrm{KL})$ with $\mathrm{KL}=\lVert\Delta\rVert^2/(2s^2)$, and verify that $\mathbb E[\rho]=1$.</p>
+<p><strong>Solution.</strong> The normalizers $-D\log s-\tfrac D2\log2\pi$ are equal and cancel. Writing $x'=\mu_{\text{old}}+s\xi$:</p>
+<div class="math-block">\[ \log\rho=\frac{\lVert s\xi\rVert^2-\lVert s\xi-\Delta\rVert^2}{2s^2}=\frac{2s\,\xi^\top\Delta-\lVert\Delta\rVert^2}{2s^2}=\frac{\xi^\top\Delta}{s}-\frac{\lVert\Delta\rVert^2}{2s^2}. \]</div>
+<p>$\xi^\top\Delta\sim\mathcal N(0,\lVert\Delta\rVert^2)$, so $\log\rho$ has mean $-\lVert\Delta\rVert^2/(2s^2)=-\mathrm{KL}$ and variance $\lVert\Delta\rVert^2/s^2=2\mathrm{KL}$. The KL between two Gaussians with equal isotropic covariance is $\lVert\Delta\rVert^2/(2s^2)$, which confirms the identification. For a Gaussian $L\sim\mathcal N(m,v)$, $\mathbb E[e^L]=e^{m+v/2}=e^{-\mathrm{KL}+\mathrm{KL}}=1$.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 2.2 — Ratio sensitivity to dimension</summary><div class="solution">
+<p>With $t=0.5$, $h=0.1$, $\nu=0.8$ and a uniform per-coordinate velocity change of $0.01$ (so $\delta=5.22\times10^{-3}$), compute the fraction of transitions outside the clip band for (a) the summed log-ratio with $D=65{,}536$ and $\epsilon=0.2$; (b) the coordinate-averaged log-ratio with $\epsilon=10^{-5}$. (c) What happens to (b) when $D=8.06\times10^5$?</p>
+<p><strong>Solution.</strong> (a) $\log\rho\sim\mathcal N(-0.892,1.336^2)$. The band is $[\log0.8,\log1.2]=[-0.223,0.182]$. $P(\log\rho&gt;0.182)=1-\Phi\big((0.182+0.892)/1.336\big)=1-\Phi(0.80)=0.21$ and $P(\log\rho&lt;-0.223)=\Phi\big((-0.223+0.892)/1.336\big)=\Phi(0.50)=0.69$. Total $\approx0.90$; the Monte-Carlo run gave 0.896.</p>
+<p>(b) $\tfrac1D\log\rho\sim\mathcal N(-\delta^2/2,\delta^2/D)=\mathcal N(-1.36\times10^{-5},(2.04\times10^{-5})^2)$. The band is about $[-10^{-5},10^{-5}]$. $P(&gt;10^{-5})=1-\Phi(1.16)=0.12$ and $P(&lt;-10^{-5})=\Phi(0.18)=0.57$, for a total of $0.69$.</p>
+<p>(c) The standard deviation shrinks to $5.8\times10^{-6}$, but the mean $-\delta^2/2=-1.36\times10^{-5}$ does not depend on $D$ and already lies outside the band, so about 73% are clipped, now mostly on the low side. The averaged log-ratio has a deterministic bias of $-\mathrm{KL}/D$. With tiny clip values that bias, not the noise, decides clipping in high dimension.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 2.3 — Compute GRPO advantages</summary><div class="solution">
+<p>A prompt has $K=4$ GenEval scores $R=(1,0,1,1)$. Compute the advantages with (a) per-group sample std, (b) per-group population std, both with $\varepsilon=10^{-4}$. (c) Another prompt in the same batch has $R=(1,1,1,1)$. What does it contribute, and what should the trainer do with it?</p>
+<p><strong>Solution.</strong> Mean $0.75$; deviations $(0.25,-0.75,0.25,0.25)$; sum of squares $0.75$. (a) Sample std $=\sqrt{0.75/3}=0.5$, so $A=(0.5,-1.5,0.5,0.5)$. (b) Population std $=\sqrt{0.75/4}=0.433$, so $A=(0.577,-1.732,0.577,0.577)$. Both sum to zero, and the single failure gets three times the magnitude of each success. (c) All deviations are zero, so $A=0$ for all four. Every transition of those trajectories contributes a zero gradient but still costs forward and backward passes. This is why the repo filters zero-advantage groups (<code>zero_advantage_mode: filter_pad</code>), as dynamic sampling does in LLM GRPO.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 2.4 — Per-transition signal via Stein's lemma</summary><div class="solution">
+<p>Assume $R=\bar R+a^\top x_1+\sum_k b_k^\top\xi_k$ exactly, with independent standard normal $x_1,\xi_k\in\mathbb R^D$. Show that $\mathbb E[(R-\bar R)\xi_k]=b_k$, independent of $a$, and compute $\operatorname{tr}\operatorname{Cov}[(R-\bar R)\xi_k]$. What happens to the SNR if the initial noise explains $f=90\%$ of the reward variance?</p>
+<p><strong>Solution.</strong> $\mathbb E[(R-\bar R)\xi_k]=\mathbb E[\xi_k\xi_k^\top]b_k+\mathbb E[\xi_k x_1^\top]a+\sum_{j\ne k}\mathbb E[\xi_k\xi_j^\top]b_j=b_k$, since all cross terms vanish by independence. This is Stein's lemma for a linear function. For the covariance, $\mathbb E[(R-\bar R)^2\lVert\xi_k\rVert^2]$: split $R-\bar R=b_k^\top\xi_k+Z$ with $Z$ independent of $\xi_k$ and $\operatorname{Var}Z=\sigma_R^2-\lVert b_k\rVert^2$. Then $\mathbb E[Z^2\lVert\xi_k\rVert^2]=D(\sigma_R^2-\lVert b_k\rVert^2)$ and $\mathbb E[(b_k^\top\xi_k)^2\lVert\xi_k\rVert^2]=(D+2)\lVert b_k\rVert^2$. Subtracting $\lVert b_k\rVert^2$ for the mean gives $\operatorname{tr}\operatorname{Cov}=D\sigma_R^2+\lVert b_k\rVert^2\approx D\sigma_R^2$. So $\mathrm{SNR}_k\approx\lVert b_k\rVert/(\sigma_R\sqrt D)$. With equal shares, $\lVert b_k\rVert^2=(1-f)\sigma_R^2/T$; at $f=0.9$ the SNR drops by $\sqrt{0.1}\approx0.32$ relative to $f=0$. The 90% of the reward variance set by $x_1$ enters every transition's gradient as pure noise.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 2.5 — Budget a reverse-process rollout</summary><div class="solution">
+<p>You want to run Flow-GRPO on Wan2.1-I2V at $400\times640$, 53 frames, $T=4$ steps, 32 prompts × $K=8$. Assume 16 latent channels, 4× temporal and 8× spatial compression, FP32 caches, and four latent-sized tensors per cached step with all 4 steps cached. Estimate the trajectory cache. How many transformer forward+backward passes does one pass over the data take, and how does that compare with DiffusionART's training on the same visited states?</p>
+<p><strong>Solution.</strong> The latent is $16\times(52/4+1)\times(400/8)\times(640/8)=16\times14\times50\times80=896{,}000$ coordinates, 3.42 MiB in FP32. Per trajectory: $4\times4\times3.42\approx54.7$ MiB; for 256 videos about 13.7 GiB, held on CPU. One pass over the data is $256\times4=1{,}024$ forward+backward passes at single-latent batch size. DiffusionART also trains on visited states, so it does the same number of passes per epoch if it uses all steps, but it needs only states and cached old velocities (two latent tensors per step, about 6.8 GiB), no log-probs and no SDE noise. Its advantage is not cheaper passes but more reward improvement per pass, which is the credit-assignment argument above.</p>
+</div></details>
+
+<div class="takeaways"><p class="callout-title">Takeaways</p><ul>
+  <li>Sampling is an MDP: state $(c,t_k,x_{t_k})$, action = next latent, deterministic transitions, one terminal reward $R(x_0,c)$, horizon $T$ = 4–16 in the paper.</li>
+  <li>Likelihood-based RL requires an SDE sampler. The Flow-GRPO step has mean $x_t+h[(1+\nu^2/2)v-\nu^2x_t/(2(1-t))]$ and variance $\nu^2 t h/(1-t)$; the repo writes the same thing with the opposite velocity sign and negative <code>dt</code>.</li>
+  <li>The importance ratio depends only on the mean shift and the stored noise: $\log\rho=\xi^\top\Delta/s-\lVert\Delta\rVert^2/(2s^2)\sim\mathcal N(-\mathrm{KL},2\mathrm{KL})$. In $D\sim10^5$–$10^6$ dimensions the true ratio is extremely sharp, so practical code averages the log-density over coordinates and clips at $10^{-5}$.</li>
+  <li>Visual rewards are black-box, noisy, differently scaled scorers on decoded pixels. Group normalization removes scale and prompt difficulty, but amplifies noise in near-tied groups; multi-reward runs normalize each component before combining.</li>
+  <li>A per-transition policy gradient pushes each step along its own noise with a shared trajectory-level advantage. Its SNR scales like $\sqrt{(1-f)/(TD)}$, which is the credit-assignment problem. An endpoint-level, group-aggregated direction does not degrade with $T$.</li>
+  <li>Reverse-process RL (trains on visited states, needs likelihoods) and forward-process RL (re-noises endpoints, needs no likelihoods but needs EMA) trade efficiency against stability. DiffusionART (Step 4) takes the states of the first and the regression of the second.</li>
+</ul></div>
+
+<div class="reading"><p class="callout-title">Further reading</p><ul>
+  <li>Black et al., <a href="https://arxiv.org/abs/2305.13301">Training Diffusion Models with Reinforcement Learning</a> (DDPO): the denoising-MDP formulation.</li>
+  <li>Liu et al., <a href="https://arxiv.org/abs/2505.05470">Flow-GRPO</a>: the ODE→SDE conversion and GRPO for flow models; source of the transition used in <code>src/visual_rl/sampling.py</code>.</li>
+  <li>Xue et al., <a href="https://arxiv.org/abs/2505.07818">DanceGRPO</a>: reverse-process RL for image and video at scale.</li>
+  <li>Zheng et al., <a href="https://arxiv.org/abs/2509.16117">DiffusionNFT</a>: the forward-process family.</li>
+  <li>Kirstain et al., <a href="https://arxiv.org/abs/2305.01569">Pick-a-Pic / PickScore</a>; Liu et al., <a href="https://arxiv.org/abs/2501.13918">VideoReward</a>.</li>
+  <li>The paper: §1 (credit assignment), §2 (notation and NFT), Appendix "Reverse-Process Policy Optimization" and "Reference Transitions for ODE Trust-Region Masking". In the repo: <code>docs/reward-contract.md</code>, <code>docs/composite-rewards.md</code>, <code>docs/video-reward.md</code>.</li>
+</ul></div>
+</section>

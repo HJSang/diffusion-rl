@@ -1,0 +1,784 @@
+<section class="step" id="step-4" data-title="The DiffusionART paper">
+<header class="step-head">
+  <p class="eyebrow">Step 4 · 1 day</p>
+  <h2>The DiffusionART paper, section by section</h2>
+  <p class="lede">After this step you can derive every equation in the paper, explain why NFT-style training needs both of its stabilizers and why DiffusionART needs neither, write the algorithm from memory, and judge which experimental claims are strongly supported and which are not.</p>
+</header>
+
+<h3 id="s4-story">The paper in one paragraph</h3>
+
+<p>Online diffusion RL has two families. Reverse-process methods such as Flow-GRPO treat each denoising step as an action, convert the ODE sampler into an SDE so that the step has a log-probability, and push every step of a trajectory by that trajectory's scalar advantage. They train on the states the sampler actually visits, but credit assignment is poor: each step is nudged along its own sampled noise, weighted by an advantage it only partly caused. Forward-process methods such as DiffusionNFT re-noise the finished samples and regress velocities toward reward-weighted targets. They need no likelihoods and learn fast, but they are unstable unless you train positive and negative branches jointly <em>and</em> roll out from a carefully tuned EMA copy of the policy. DiffusionART (Diffusion Reinforcement with Aggregation-First Reward Tilting) first explains both stabilizers. Joint training partially cancels a hidden <em>forward–reverse consistency force</em>; the EMA works through <em>restoration</em> toward a lagged reference, not through off-policy data. It then removes the consistency force by construction. It collapses each prompt's $K$ samples and rewards into one normalized direction $G(c)$, the empirical reward–endpoint covariance, and regresses every visited reverse-process state toward its cached velocity plus $G(c)$. It replaces the EMA with a second minibatch update whose restoration grows with drift, gated by a trust-region mask built from a KL proxy.</p>
+
+<p>The abstract's headline claim, stated exactly: on HunyuanVideo-13B with equally weighted visual and motion quality rewards, DiffusionART reaches the late-stage mean reward levels of DiffusionNFT and Flow-GRPO-Fast with <strong>12.02×</strong> and <strong>11.72×</strong> fewer GPU hours, respectively, while achieving <strong>28.8%</strong> and <strong>53.0%</strong> higher mean training rewards. The contributions box adds that DiffusionART matches the strongest baseline's efficiency on SD3.5-M without EMA or per-task tuning, and that on image-to-video it reaches MQ 6 with <strong>4.8×</strong> fewer GPU hours than Flow-GRPO-Fast. The paper also claims that DiffusionART needs no differentiable reward model, works with fewer samples per prompt, and supports pairwise reward models (DiffusionART-Pairwise).</p>
+
+<p>The paper has four contributions, and this chapter follows them in order:</p>
+<ol>
+  <li><strong>Diagnosis 1</strong> (§3.1): the NFT objective contains a consistency force that joint positive–negative training cancels only across samples, not at each state.</li>
+  <li><strong>Diagnosis 2</strong> (§3.2): EMA stabilizes NFT through restoration, and its strength must be tuned per task.</li>
+  <li><strong>Method</strong> (§4): aggregation-first guidance (§4.1), two-update restoration (§4.2), a trust-region mask (§4.3), and a pairwise variant (§4.4).</li>
+  <li><strong>Evidence</strong> (§5): SD3.5-M, FLUX.1-dev, HunyuanVideo-13B and Wan2.1-I2V-14B.</li>
+</ol>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>In GRPO, a sequence's scalar advantage $A_i$ multiplies the gradient of the log-probability of the tokens that sequence actually sampled. Bad samples have their own tokens pushed <em>down</em>. DiffusionART has no per-sample sign. Every state on every trajectory of prompt $c$, including the worst sample's trajectory, is pulled in the <em>same</em> reward-improving direction $G(c)$. The group is still the unit of comparison, as in GRPO, but the group's output is a vector in sample space rather than $K$ scalars. Nothing in LLM RL quite matches this, because you cannot add a vector to a discrete token. The closest analogy is distillation toward a reward-tilted target policy rather than policy-gradient ascent.</p></div>
+
+<h3 id="s4-puzzle">§3.1 The puzzle: each NFT branch alone collapses</h3>
+
+<h4>Setup and symbols</h4>
+<p>Recall from Step 3 that DiffusionNFT samples $K$ endpoints per prompt from the frozen rollout policy $p_{\text{old}}(x_0\mid c)$ and maps each raw reward $R_i$ to a <em>goodness</em></p>
+<div class="math-block">\[ r_i=\tfrac12\Bigl[1+\operatorname{clip}\Bigl(\tfrac{R_i-\bar R_c}{Z_c},-1,1\Bigr)\Bigr]\in[0,1], \]</div>
+<p>where $\bar R_c$ is the prompt's mean reward and $Z_c&gt;0$ a scale. Without clipping, $\sum_i(2r_i-1)=0$. Weighting $p_{\text{old}}$ by $r$ and by $1-r$ defines a positive and a negative endpoint distribution, $p_+\propto r\,p_{\text{old}}$ and $p_-\propto(1-r)\,p_{\text{old}}$. NFT builds $v_{\theta,\pm}=v_{\text{old}}\pm\beta(v_\theta-v_{\text{old}})$ and minimizes</p>
+<div class="math-block">\[ \mathcal L_{\text{NFT}}=\mathbb E_{\mathcal D_{\text{old}}}\bigl[r\lVert v_{\theta,+}-u_t\rVert^2+(1-r)\lVert v_{\theta,-}-u_t\rVert^2\bigr]=\beta^2\,\mathbb E\bigl[\lVert v_\theta-v_{\text{tgt}}\rVert^2\bigr]+\text{const},\qquad v_{\text{tgt}}=a\,u_t+(1-a)\,v_{\text{old}},\ a=\tfrac{2r-1}{\beta}. \]</div>
+<p>$\mathcal D_{\text{old}}$ is the training distribution of $(c,x_0,r,t,\epsilon)$ with $x_0\sim p_{\text{old}}$ and $\epsilon\sim\mathcal N(0,I)$. The states NFT trains on are <em>forward-noised</em> endpoints, $x_t=(1-t)x_0+t\epsilon$, not states the sampler visited.</p>
+
+<p>The paper starts from an experiment. It removes EMA, so $v_\theta=v_{\text{old}}$ at every update, and trains SD3.5-M on GenEval with only the positive branch, only the negative branch, or both. Figure 2(a) of the paper shows the outcome. Both single-branch runs fall from about 0.2 to roughly zero GenEval within the first handful of steps and stay there. The joint run climbs to about 0.9 by step 100. This is puzzling, because DiffusionNFT is motivated by the fact that the positive, original and negative <em>ideal</em> velocity fields are collinear. If they all point the same way, either branch alone should suffice.</p>
+
+<p>To make "ideal" precise, the paper introduces, for $b\in\{+,\text{old},-\}$:</p>
+<ul>
+  <li>$P_b$: the endpoint distribution $p_b(x_0\mid c)$.</li>
+  <li>$Q_b$: the joint <strong>forward</strong> law of $(x_0,\epsilon,x_t,u_t)$, obtained by drawing $x_0\sim P_b$ and $\epsilon\sim\mathcal N(0,I)$ independently, then setting $x_t=(1-t)x_0+t\epsilon$ and $u_t=x_0-\epsilon$.</li>
+  <li>$s_t=(x_t,t,c)$: a state.</li>
+  <li>$v^b_{\text{fwd}}(s_t):=\mathbb E_{Q_b}[u_t\mid s_t]$: the <strong>ideal forward velocity</strong> induced by $P_b$. This is the field that flow matching would learn if trained to convergence on samples of $P_b$ (Step 1).</li>
+  <li>$v^{\text{old}}_{\text{rvs}}:=v_{\text{old}}$: the field the reverse sampler actually integrates to produce $P_{\text{old}}$.</li>
+</ul>
+<p>If the model were a perfect flow-matching fit of its own samples, $v^{\text{old}}_{\text{rvs}}=v^{\text{old}}_{\text{fwd}}$. The paper calls this <em>forward–reverse compatibility</em>. After even one RL update, nothing enforces it.</p>
+
+<h4>Lemma 1: ideal NFT guidance is a conditional covariance</h4>
+<p>Fix a state $s_t$. Define the <em>statewise expected goodness</em> and the <em>statewise reward–velocity covariance</em></p>
+<div class="math-block">\[ q:=\mathbb E_{Q_{\text{old}}}[r(x_0,c)\mid s_t],\qquad g:=\operatorname{Cov}_{Q_{\text{old}}}[r(x_0,c),u_t\mid s_t]. \]</div>
+<p>$q$ answers the question "given what I can see in this noisy state, how good do I expect the endpoint to be?" $g$ is the direction in velocity space along which good endpoints differ from bad ones, among endpoints consistent with this state. Lemma 1 says that, if $0&lt;q&lt;1$,</p>
+<div class="math-block">\[ q\bigl(v^+_{\text{fwd}}-v^{\text{old}}_{\text{fwd}}\bigr)=(1-q)\bigl(v^{\text{old}}_{\text{fwd}}-v^-_{\text{fwd}}\bigr)=g. \]</div>
+<p>So the step from the old field to the positive field and the step from the negative field to the old field both point along $g$; they differ only in length ($g/q$ versus $g/(1-q)$).</p>
+
+<p><strong>Proof, step by step</strong> (paper, Appendix B, "Conditional Covariance Identity for Ideal NFT").</p>
+<ol>
+  <li><em>Reweighting the endpoint reweights the whole forward tuple.</em> $P_+$ is $P_{\text{old}}$ reweighted by $r(x_0,c)/Z_+(c)$ with $Z_+=\mathbb E_{P_{\text{old}}}[r\mid c]$. Because $\epsilon$ is drawn independently of $x_0$ and $(x_t,u_t)$ are deterministic functions of $(x_0,\epsilon)$, the same factor reweights the joint law: $Q_+(\cdot\mid t,c)=\tfrac{r(x_0,c)}{Z_+(c)}\,Q_{\text{old}}(\cdot\mid t,c)$. Likewise $Q_-=\tfrac{1-r}{Z_-}Q_{\text{old}}$ with $Z_-=\mathbb E_{P_{\text{old}}}[1-r\mid c]$.</li>
+  <li><em>Marginalize onto $x_t$.</em> Integrating the reweighting factor over everything except $x_t$ replaces $r(x_0,c)$ by its conditional mean given $x_t$, which is $q$: $Q_+(x_t\mid t,c)=\tfrac{q}{Z_+}Q_{\text{old}}(x_t\mid t,c)$ and $Q_-(x_t\mid t,c)=\tfrac{1-q}{Z_-}Q_{\text{old}}(x_t\mid t,c)$.</li>
+  <li><em>Bayes' rule.</em> Divide step 1 by step 2. The normalizers $Z_\pm$ cancel, and the posterior over endpoints given the state becomes $Q_+(\cdot\mid s_t)=\tfrac{r}{q}Q_{\text{old}}(\cdot\mid s_t)$ and $Q_-(\cdot\mid s_t)=\tfrac{1-r}{1-q}Q_{\text{old}}(\cdot\mid s_t)$. In words: among the endpoints compatible with $s_t$, the positive distribution up-weights each one by its goodness relative to the local average goodness.</li>
+  <li><em>Take conditional expectations of $u_t$.</em> $q\,v^+_{\text{fwd}}=\mathbb E_{Q_{\text{old}}}[r\,u_t\mid s_t]$ and $(1-q)\,v^-_{\text{fwd}}=\mathbb E_{Q_{\text{old}}}[(1-r)\,u_t\mid s_t]$.</li>
+  <li><em>Subtract $v^{\text{old}}_{\text{fwd}}=\mathbb E_{Q_{\text{old}}}[u_t\mid s_t]$.</em> $q(v^+_{\text{fwd}}-v^{\text{old}}_{\text{fwd}})=\mathbb E[r u_t\mid s_t]-\mathbb E[r\mid s_t]\,\mathbb E[u_t\mid s_t]=g$. The negative side is the same algebra with $1-r$, and $\operatorname{Cov}(1-r,u_t)=-g$, which gives $(1-q)(v^{\text{old}}_{\text{fwd}}-v^-_{\text{fwd}})=g$. ∎</li>
+</ol>
+
+<h4>The forward–reverse gap and Proposition 1</h4>
+<p>Define the gap at a state as</p>
+<div class="math-block">\[ e:=v^{\text{old}}_{\text{fwd}}(s_t)-v^{\text{old}}_{\text{rvs}}(s_t). \]</div>
+<p>$e$ measures how far the sampler's velocity is from the velocity that flow matching on the sampler's own outputs would produce. Proposition 1 computes the NFT force at the pure on-policy point $v_\theta=v^{\text{old}}_{\text{rvs}}$. Here "force" means the negative output-space gradient, normalized by $2\beta$:</p>
+<div class="math-block">\[ \mathcal F_{\text{NFT}}(s_t):=-\frac{1}{2\beta}\nabla_{v_\theta(s_t)}\mathcal L_{\text{NFT}}(s_t)\Big|_{v_\theta=v^{\text{old}}_{\text{rvs}}}=\underbrace{2g}_{\text{reward-improving}}+\underbrace{(2q-1)\,e}_{\text{consistency force}}. \]</div>
+
+<p><strong>Proof, step by step</strong> (Appendix B, "NFT Force and Restoration Decompositions"). Two short computations are needed.</p>
+<p><em>(i) The MSE form and the per-sample force.</em> Write $d=v_\theta-v_{\text{old}}$ (drift), $h=u_t-v_{\text{old}}$ (training residual) and $A=2r-1$. The positive residual is $v_{\theta,+}-u_t=\beta d-h$ and the negative residual is $-\beta d-h$. Expanding:</p>
+<div class="math-block">\[ \ell_{\text{NFT}}=r\lVert\beta d-h\rVert^2+(1-r)\lVert-\beta d-h\rVert^2=\beta^2\lVert d\rVert^2-2\beta A\langle d,h\rangle+\lVert h\rVert^2=\beta^2\Bigl\lVert d-\tfrac{A}{\beta}h\Bigr\rVert^2+(1-A^2)\lVert h\rVert^2 . \]</div>
+<p>The cross terms $\pm2\beta\langle d,h\rangle$ carry weights $r$ and $1-r$, so they combine into $-2\beta(2r-1)\langle d,h\rangle$. Completing the square gives the last form. Since $v_{\text{old}}+(A/\beta)h=v_{\text{tgt}}$, the first term is $\beta^2\lVert v_\theta-v_{\text{tgt}}\rVert^2$, and $(1-A^2)\lVert h\rVert^2=4r(1-r)\lVert h\rVert^2$ does not depend on $\theta$. Differentiating in $v_\theta$ gives $-\nabla_{v_\theta}\ell=2\beta A h-2\beta^2 d$. At $d=0$ the per-sample descent direction is $2\beta(2r-1)(u_t-v_{\text{old}})$. High- and low-reward samples drive the <em>same</em> residual in opposite directions.</p>
+<p><em>(ii) Condition on the state.</em> Now fix $s_t$ and average over all $(x_0,\epsilon)$ compatible with it under $Q_{\text{old}}$. Since $h=u_t-v^{\text{old}}_{\text{rvs}}(s_t)$, and $v^{\text{old}}_{\text{rvs}}(s_t)$ is a constant once $s_t$ is fixed:</p>
+<div class="math-block">\[ \mathcal F_{\text{NFT}}(s_t)=\mathbb E[(2r-1)h\mid s_t]=2\operatorname{Cov}(r,h\mid s_t)+\bigl(2\,\mathbb E[r\mid s_t]-1\bigr)\,\mathbb E[h\mid s_t]. \]</div>
+<p>This is the identity $\mathbb E[XY]=\operatorname{Cov}(X,Y)+\mathbb E[X]\mathbb E[Y]$ with $X=2r-1$ and $Y=h$. Subtracting a constant does not change a covariance, so $\operatorname{Cov}(r,h\mid s_t)=\operatorname{Cov}(r,u_t\mid s_t)=g$. The mean residual is $\mathbb E[h\mid s_t]=v^{\text{old}}_{\text{fwd}}-v^{\text{old}}_{\text{rvs}}=e$, and $\mathbb E[r\mid s_t]=q$. Substituting gives $2g+(2q-1)e$. ∎</p>
+
+<h4>Each branch alone, and why both are needed</h4>
+<p>Run the same computation with only the positive term $r\lVert\beta d-h\rVert^2$ and only the negative term $(1-r)\lVert-\beta d-h\rVert^2$. At $d=0$, the normalized forces are $\mathcal F_+=\mathbb E[r\,h\mid s_t]$ and $\mathcal F_-=-\mathbb E[(1-r)\,h\mid s_t]$ (Exercise 4.4 does the algebra), which work out to</p>
+<div class="math-block">\[ \mathcal F_+=g+q\,e=q\,\bigl(v^+_{\text{fwd}}-v^{\text{old}}_{\text{rvs}}\bigr),\qquad \mathcal F_-=g-(1-q)\,e=(1-q)\,\bigl(v^{\text{old}}_{\text{rvs}}-v^-_{\text{fwd}}\bigr), \]</div>
+<p>and $\mathcal F_++\mathcal F_-=\mathcal F_{\text{NFT}}$. The second form of each follows from Lemma 1: $q\,v^+_{\text{fwd}}=q\,v^{\text{old}}_{\text{fwd}}+g$. The geometry is now clear. The positive branch <em>pulls</em> the sampler's velocity toward $v^+_{\text{fwd}}$, and so toward $v^{\text{old}}_{\text{fwd}}$ with weight $q$. The negative branch <em>pushes</em> it away from $v^-_{\text{fwd}}$, and so away from $v^{\text{old}}_{\text{fwd}}$ with weight $1-q$. Along $g$ the two reinforce each other. Along $e$ they oppose each other. A single branch therefore carries an uncancelled $qe$ or $-(1-q)e$, a force that has nothing to do with reward.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 820 400" role="img" aria-label="Force decomposition of the NFT update at one state, compared with the DiffusionART force">
+  <defs>
+    <marker id="s4-ah-fg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--fg)"/></marker>
+    <marker id="s4-ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent)"/></marker>
+    <marker id="s4-ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--bad)"/></marker>
+    <marker id="s4-ah-acc2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent-2)"/></marker>
+  </defs>
+  <text x="20" y="28" style="fill:var(--fg);font-size:14px;font-weight:600">NFT at one state (q = 0.6)</text>
+  <line x1="190" y1="300" x2="600" y2="300" style="stroke:var(--muted);stroke-width:1.5"/>
+  <text x="420" y="322" style="fill:var(--muted);font-size:12px">fields collinear along g</text>
+  <line x1="400" y1="130" x2="360" y2="300" style="stroke:var(--bad);stroke-width:1.5;stroke-dasharray:5 4" marker-end="url(#s4-ah-bad)"/>
+  <text x="388" y="232" style="fill:var(--bad);font-size:13px">e</text>
+  <line x1="400" y1="130" x2="296" y2="232" style="stroke:var(--fg);stroke-width:2" marker-end="url(#s4-ah-fg)"/>
+  <text x="170" y="246" style="fill:var(--fg);font-size:12px">F(+) = g + q·e (pull)</text>
+  <line x1="400" y1="130" x2="336" y2="62" style="stroke:var(--fg);stroke-width:2" marker-end="url(#s4-ah-fg)"/>
+  <text x="200" y="58" style="fill:var(--fg);font-size:12px">F(−) = g − (1−q)·e (push)</text>
+  <line x1="400" y1="130" x2="240" y2="130" style="stroke:var(--accent);stroke-width:2;stroke-dasharray:6 4" marker-end="url(#s4-ah-acc)"/>
+  <text x="250" y="122" style="fill:var(--accent);font-size:12px">2g</text>
+  <line x1="240" y1="130" x2="232" y2="164" style="stroke:var(--bad);stroke-width:2" marker-end="url(#s4-ah-bad)"/>
+  <line x1="400" y1="130" x2="232" y2="164" style="stroke:var(--fg);stroke-width:3" marker-end="url(#s4-ah-fg)"/>
+  <text x="70" y="182" style="fill:var(--fg);font-size:12px">F_NFT = 2g + (2q−1)·e</text>
+  <circle cx="400" cy="130" r="6" style="fill:var(--fg)"/>
+  <text x="412" y="126" style="fill:var(--fg);font-size:13px">v_θ = v_rvs(old)</text>
+  <circle cx="227" cy="300" r="6" style="fill:var(--surface);stroke:var(--fg);stroke-width:1.5"/>
+  <text x="200" y="286" style="fill:var(--fg);font-size:13px">v_fwd(+)</text>
+  <circle cx="360" cy="300" r="6" style="fill:var(--surface);stroke:var(--fg);stroke-width:1.5"/>
+  <text x="336" y="322" style="fill:var(--fg);font-size:13px">v_fwd(old)</text>
+  <circle cx="560" cy="300" r="6" style="fill:var(--surface);stroke:var(--fg);stroke-width:1.5"/>
+  <text x="540" y="286" style="fill:var(--fg);font-size:13px">v_fwd(−)</text>
+  <text x="20" y="364" style="fill:var(--muted);font-size:12px">Positive branch pulls toward v_fwd(+), negative branch pushes away from v_fwd(−).</text>
+  <text x="20" y="382" style="fill:var(--muted);font-size:12px">Along g they add; along e they oppose, leaving (2q−1)·e, which is nonzero whenever q ≠ 1/2.</text>
+  <line x1="630" y1="20" x2="630" y2="340" style="stroke:var(--line);stroke-width:1"/>
+  <text x="645" y="28" style="fill:var(--accent-2);font-size:14px;font-weight:600">DiffusionART</text>
+  <circle cx="790" cy="150" r="6" style="fill:var(--fg)"/>
+  <text x="712" y="140" style="fill:var(--fg);font-size:13px">v_θ(0)</text>
+  <line x1="790" y1="150" x2="660" y2="150" style="stroke:var(--accent-2);stroke-width:3" marker-end="url(#s4-ah-acc2)"/>
+  <text x="665" y="175" style="fill:var(--accent-2);font-size:13px">force along G(c)</text>
+  <text x="645" y="210" style="fill:var(--fg);font-size:12px">target = v_θ(0) + G(c)</text>
+  <text x="645" y="230" style="fill:var(--fg);font-size:12px">never uses u_t or v_fwd,</text>
+  <text x="645" y="250" style="fill:var(--fg);font-size:12px">so there is no e term</text>
+  <text x="645" y="270" style="fill:var(--muted);font-size:12px">same G for every state</text>
+  <text x="645" y="290" style="fill:var(--muted);font-size:12px">of prompt c</text>
+</svg>
+<figcaption>Force decomposition at one state, drawn to scale with $g=(-80,0)$, $e=(-40,170)$ and $q=0.6$. The black arrows are the branch forces $\mathcal F_\pm$ and their sum. The teal dashed arrow is the reward-improving part $2g$, and the short red arrow is the residual consistency force $(2q-1)e$. DiffusionART (right) builds its target without the forward velocity, so its force is $G(c)$ alone. This mirrors the paper's Figures 2(b) and 4 (left).</figcaption>
+</figure>
+
+<h4>Why joint training is not enough</h4>
+<p>Joint training leaves the residual $(2q-1)e$. It vanishes at a state only if $q=1/2$ <em>at that state</em>. Prompt-level centering guarantees something weaker: without clipping, $\sum_i(2r_i-1)=0$ across the $K$ samples. That balances rewards across samples. It does not balance them per state, and it does not imply $\sum_i(2r_i-1)e_i\approx0$, where $e_i$ is the one-sample Monte Carlo estimate of $e$. The time dependence is the key:</p>
+<ul>
+  <li>At $t=1$ the state is pure noise and reveals nothing about $x_0$, so $q=\mathbb E[r]=1/2$ (without clipping) and the residual vanishes.</li>
+  <li>As $t\to0$ the state reveals more and more of the endpoint. $q$ moves toward 0 or 1, and the weight $\lvert 2q-1\rvert$ on the gap grows.</li>
+</ul>
+<p>States with $q&gt;1/2$ are systematically pulled toward $v^{\text{old}}_{\text{fwd}}$; states with $q&lt;1/2$ are pushed away. The residual dilutes the reward-improving guidance in the aggregate gradient, and something else must hold training together. That something is the EMA.</p>
+
+<p><strong>Worked example.</strong> The toy later in this chapter computes $q$, $g$ and $e$ exactly (with a kernel posterior) for a 2D flow model. At initialization it measures a mean $\lvert2q-1\rvert$ of 0.18 for $t\ge0.7$ and 0.75 for $t\le0.4$, which matches the time dependence above. The RMS of $2g$ is 0.934 and the RMS of $(2q-1)e$ is 0.172, so at the start the reward term dominates. During on-policy NFT training with $K=2$, the residual grows to 1.250 while $2g$ is 0.602 (iteration 100), then to 29.3 against 0.825 (iteration 150). The gradient norm reaches $1.17\times10^3$ at that point, and the run later diverges.</p>
+
+<div class="callout insight"><p class="callout-title">Key idea</p><p>NFT's target is built from forward-noised endpoints, so it implicitly assumes $v_{\text{rvs}}=v_{\text{fwd}}$. The gap $e$ enters the force weighted by the statewise reward imbalance $2q-1$. Joint training cancels it only on average across samples. The paper's design principle is to remove the force <em>statewise</em> rather than rely on cross-sample cancellation (Insight 1).</p></div>
+
+<h3 id="s4-ema">§3.2 Off-policy EMA: stability through restoration</h3>
+
+<p>Even with joint training, pure on-policy NFT collapses after a sharp rise in its pre-clipping gradient norm. In the paper's Figure 3(a), on OCR, the one-update run reaches OCR 0.9 at step 21, then collapses, and its gradient norm (dashed) spikes as the reward falls. DiffusionNFT uses an EMA rollout policy, $\theta_{\text{old}}\leftarrow\eta\,\theta_{\text{old}}+(1-\eta)\theta$. In this section, and only here, $\eta$ is the EMA decay, not the tilt strength. The EMA could stabilize training through two different mechanisms:</p>
+<ol>
+  <li>a slower-moving rollout distribution (off-policy data), or</li>
+  <li>the lagged reference $v_{\text{old}}$ that stays inside $v_{\text{tgt}}$ in the loss.</li>
+</ol>
+
+<h4>Proposition 2: the loss splits into guidance plus restoration</h4>
+<div class="math-block">\[ \mathcal L_{\text{NFT}}=\mathbb E_{\mathcal D_{\text{old}}}\Bigl[-2\beta(2r-1)\langle d,h\rangle+\beta^2\lVert d\rVert^2\Bigr]+\text{const},\qquad d=v_\theta-v_{\text{old}},\ h=u_t-v_{\text{old}}. \]</div>
+<p><strong>Proof.</strong> It is line two of the expansion in (i) above, $\beta^2\lVert d\rVert^2-2\beta(2r-1)\langle d,h\rangle+\lVert h\rVert^2$. Take the expectation and absorb $\lVert h\rVert^2$, which does not depend on $\theta$, into the constant. ∎</p>
+<p>The linear term carries the reward guidance <em>and</em> the consistency force (its on-policy gradient is exactly $\mathcal F_{\text{NFT}}$). The quadratic term $\beta^2\lVert d\rVert^2$ pulls $v_\theta$ back toward $v_{\text{old}}$. Its gradient, $2\beta^2 d$, is zero at $d=0$. <strong>Pure on-policy NFT therefore has no restoration at all</strong>, and the residual consistency force acts unopposed. An EMA keeps $\theta_{\text{old}}$ lagging behind $\theta$, so $d\ne0$ and restoration is active.</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>This is the role PPO's ratio clipping and KL penalty play, seen from a different side. A quadratic penalty toward the behavior policy (here $\beta^2\lVert v_\theta-v_{\text{old}}\rVert^2$) is the Gaussian analogue of a KL to the rollout policy. The difference is that NFT gets the penalty only when the rollout policy <em>lags</em>. With fully on-policy updates and one gradient step, the penalty is exactly zero, much as the PPO clip never activates on the first minibatch of an epoch.</p></div>
+
+<h4>Two ablations that separate the mechanisms</h4>
+<ul>
+  <li><strong>EMA rollouts, no anchor.</strong> Keep EMA-policy rollouts but replace $v_{\text{old}}$ by $v_\theta$ (stop-gradient) inside $v_{\text{tgt}}$. Off-policy data remains, but restoration is gone. In Figure 3(b), on GenEval, this run tracks NFT (EMA) for about 70 steps and then collapses to zero. Off-policy data alone does not stabilize NFT.</li>
+  <li><strong>No EMA, two updates.</strong> Split each rollout batch into two disjoint minibatches and update once on each with $\beta=1$. The first update starts at $v^{(0)}_\theta=v_{\text{old}}$, where restoration is zero. The second starts from $v^{(1)}_\theta$ and therefore gets restoration toward $v^{(0)}_\theta$. In Figure 3(a), this run avoids collapse over the observed window but reaches OCR 0.9 only at step 320 instead of 21: <strong>15.2× slower</strong>.</li>
+</ul>
+<p>Restoration is the stabilizer. In NFT, though, it is expensive.</p>
+
+<h4>Why a small restoration can dominate the parameter gradient</h4>
+<p>Figure 3(c) measures both terms at the second update, averaged over rollouts 0–17. Restoration has a <strong>9.4× smaller</strong> output-force RMS than guidance, yet a <strong>4.9× larger</strong> aggregated parameter-gradient norm. The paper's explanation is that "heterogeneous per-sample guidance largely cancels across states, while restoration survives aggregation", and it defers a detailed analysis. Here is one way to see why this happens. It is my gloss, not the paper's analysis. The parameter gradient is a sum over states of Jacobian-transposed output forces, $\nabla_\theta\mathcal L=-\sum_s J_s^\top f_s$ with $J_s=\partial v_\theta(s)/\partial\theta$.</p>
+<ul>
+  <li><em>Guidance</em> per state is $f_s=(2r-1)h$. The sign of $2r-1$ varies across samples, and $h=u_t-v_{\text{old}}$ contains the sample noise $\epsilon$. The terms $J_s^\top f_s$ point in many directions, and their sum grows roughly like the square root of the number of states.</li>
+  <li><em>Restoration</em> per state is $f_s=-\beta^2 d_s$. The drift was itself produced by a parameter change $\Delta\theta$, so $d_s\approx J_s\Delta\theta$ and $J_s^\top d_s\approx J_s^\top J_s\,\Delta\theta$. Every term is a positive semidefinite matrix applied to the same $\Delta\theta$, so the terms add coherently and their sum grows linearly in the number of states.</li>
+</ul>
+<p>A small but coherent output force can therefore beat a large but incoherent one after aggregation, which is consistent with Figure 3(c). The design consequence is the one the paper draws. Guidance must also be coherent across states, or restoration will swamp it.</p>
+
+<h4>Why EMA is not enough</h4>
+<p>The EMA controls restoration indirectly, through the lag. Too little lag gives too little restoration and risks collapse; too much slows reward improvement. The paper cites DiffusionNFT's own results. Fully on-policy updates collapse, nearly offline updates converge impractically slowly, and the default schedule $\eta=\min(0.001i,0.5)$ is unstable on OCR, which needs a maximum retention of 0.999. In the paper's FLUX experiments, transferring NFT's GenEval-tuned EMA and $\beta$ makes training unstable (Figure 6(a)). Per-task tuning limits scalability.</p>
+
+<div class="callout insight"><p class="callout-title">Key idea</p><p>Restoration stabilizes NFT-style training. EMA requires task-specific tuning, and two updates per rollout avoid the tuning but slow reward improvement about 15×, because NFT's incoherent guidance cancels while restoration does not. A better design adapts restoration to each state's drift and keeps guidance coherent enough to stay dominant (Insight 2).</p></div>
+
+<h3 id="s4-guidance">§4.1 Aggregation-first guidance</h3>
+
+<h4>Motivation</h4>
+<p>The consistency force enters because NFT's target is built from $u_t$, whose conditional mean is the forward velocity $v^{\text{old}}_{\text{fwd}}$, and that differs from the reverse field by $e$. The fix is to build a target that never mentions $u_t$. DiffusionART aggregates each prompt's endpoints and rewards into one direction <em>first</em>, then assigns that direction to the reverse-process states the sampler actually visited.</p>
+
+<h4>The reward-tilted endpoint distribution</h4>
+<p>At each iteration, tilt the <em>current rollout distribution</em> (not a fixed pretrained one) exponentially:</p>
+<div class="math-block">\[ p_\tau(x_0\mid c)\ \propto\ p_{\text{old}}(x_0\mid c)\,\exp\bigl(\tau R(x_0,c)\bigr),\qquad \tau\ge0 . \]</div>
+<p>The paper writes the tilt strength as $\tau$, because $\eta$ already names the EMA decay. The repo README writes the same formula with $\eta$. Setting $\tau=0$ recovers $p_{\text{old}}$. Larger $\tau$ prefers higher-reward endpoints. This is the familiar KL-regularized RL optimum, $\arg\max_p\ \mathbb E_p[R]-\tfrac1\tau\mathrm{KL}(p\Vert p_{\text{old}})$, applied one iteration at a time.</p>
+
+<h4>Lemma 2: the first-order tilt is a covariance</h4>
+<div class="math-block">\[ \frac{\partial}{\partial\tau}\mathbb E_{p_\tau}[x_0\mid c]\Big|_{\tau=0}=\operatorname{Cov}_{p_{\text{old}}}(R,x_0\mid c). \]</div>
+<p><strong>Proof</strong> (Appendix B, "Covariance as the First-Order Reward Tilt"). Suppress $c$. Let $M(\tau)=\mathbb E_{p_{\text{old}}}[x_0e^{\tau R}]$ and $Z(\tau)=\mathbb E_{p_{\text{old}}}[e^{\tau R}]$. The tilted density is $p_{\text{old}}e^{\tau R}/Z(\tau)$, so the tilted mean is $M(\tau)/Z(\tau)$. Differentiating under the expectation gives $M'(\tau)=\mathbb E[x_0Re^{\tau R}]$ and $Z'(\tau)=\mathbb E[Re^{\tau R}]$. At $\tau=0$, $Z(0)=1$, $M(0)=\mathbb E[x_0]$, $M'(0)=\mathbb E[x_0R]$ and $Z'(0)=\mathbb E[R]$. The quotient rule gives</p>
+<div class="math-block">\[ \Bigl(\tfrac{M}{Z}\Bigr)'(0)=\frac{M'(0)Z(0)-M(0)Z'(0)}{Z(0)^2}=\mathbb E[x_0R]-\mathbb E[x_0]\,\mathbb E[R]=\operatorname{Cov}(R,x_0). \]</div>
+<p>Differentiation under the expectation is valid if, for example, $\mathbb E[(1+\lVert x_0\rVert)(1+\lvert R\rvert)e^{a\lvert R\rvert}]&lt;\infty$ for some $a&gt;0$. ∎</p>
+
+<p>The check below verifies the identity numerically with central finite differences on a 2D mixture, plus a 1D Gaussian with a closed form. For $p_{\text{old}}=\mathcal N(\mu,s^2)$ and $R(x)=x$, the tilted law is $\mathcal N(\mu+\tau s^2,s^2)$, so the derivative is $s^2=\operatorname{Var}(x)=\operatorname{Cov}(R,x)$.</p>
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Finite-difference check of Lemma 2 (<code>tutorial/scratch/step4/tilt_check.py</code>)</figcaption>
+  <pre><code class="language-python">{{CODE:tilt}}</code></pre>
+</figure>
+<pre><code class="language-text">{{OUT:tilt}}</code></pre>
+<p>The error falls by 100× for every 10× smaller $h$. That is the $O(h^2)$ behaviour of a central difference, and it confirms that the first derivative is exactly the covariance.</p>
+
+<h4>From endpoints to every state, under rectified flow</h4>
+<p>Under rectified flow, $u_t=x_0-\epsilon$ with $\epsilon$ independent of $x_0$, so $\operatorname{Cov}_{Q_{\text{old}}}(R,u_t\mid c)=\operatorname{Cov}(R,x_0\mid c)-\operatorname{Cov}(R,\epsilon\mid c)=\operatorname{Cov}_{p_{\text{old}}}(R,x_0\mid c)$ at every noise level. The same vector is therefore the first-order change in the average velocity target at every $t$. It is also the prompt-level counterpart of the ideal NFT guidance $g$ from Lemma 1. At $t=1$ the state carries no endpoint information, so conditioning on $s_t$ does nothing. Without clipping, $r=\tfrac12+\tfrac{R-\bar R_c}{2Z_c}$ is affine in $R$, so $g=\operatorname{Cov}(r,u_t)=\tfrac{1}{2Z_c}\operatorname{Cov}(R,x_0)$, a positive multiple of the same direction.</p>
+
+<h4>The estimator and its normalization</h4>
+<p>Each prompt has $K$ endpoints and rewards. The paper estimates and normalizes:</p>
+<div class="math-block">\[ \boxed{\ \overline{\operatorname{Cov}}(R,x_0\mid c)=\frac1K\sum_{i=1}^K(R_i-\bar R_c)\bigl(x_0^{(i)}-\bar x_{0,c}\bigr),\qquad G(c)=\frac{\overline{\operatorname{Cov}}}{\operatorname{RMS}(\overline{\operatorname{Cov}})}\ } \]</div>
+<p>$\bar x_{0,c}$ is the group mean endpoint, and $\operatorname{RMS}(z)=\sqrt{D^{-1}\sum_j z_j^2}$ over the $D$ coordinates of the latent. Normalization fixes the guidance magnitude at unit RMS across prompts and reward models. This removes differences in reward scale and spread without a guidance-strength coefficient. A reward multiplied by 100, or a prompt with a tiny reward spread, produces the same $\lVert G\rVert$. Only the direction carries information.</p>
+
+<h4>Worked example: $G(c)$ for $K=4$ in 2D</h4>
+<p>Take endpoints $x^{(1..4)}=(0,0),(2,0),(0,2),(2,2)$ with rewards $R=1,3,2,6$.</p>
+<ul>
+  <li>Means: $\bar R=3$, $\bar x=(1,1)$. Centered rewards: $-2,0,-1,3$. Centered endpoints: $(-1,-1),(1,-1),(-1,1),(1,1)$.</li>
+  <li>Products: $(2,2)$, $(0,0)$, $(1,-1)$ and $(3,3)$, which sum to $(6,4)$. Then $\overline{\operatorname{Cov}}=(6,4)/4=(1.5,1.0)$.</li>
+  <li>$\operatorname{RMS}=\sqrt{(1.5^2+1.0^2)/2}=\sqrt{1.625}=1.2748$, so $G=(1.1767,0.7845)$. Its RMS is 1 and its Euclidean norm is $\sqrt2$.</li>
+  <li>First-order tilted mean at $\tau=0.05$: $\bar x+\tau\,\overline{\operatorname{Cov}}=(1.075,1.050)$. Exact self-normalized tilted mean: $(1.0761,1.0518)$. At $\tau=0.2$, first order gives $(1.30,1.20)$ and exact gives $(1.3092,1.2251)$. The agreement degrades as $\tau$ grows, as a first-order approximation should.</li>
+</ul>
+<p>Now apply it. A visited state of this prompt with cached velocity $v^{(0)}=(0.3,-0.5)$ gets the frozen target $v^{(0)}+G=(1.4767,0.2845)$. At the start of the update the loss is $\tfrac wD\lVert G\rVert^2=w$ (unit RMS means $\lVert G\rVert^2=D$), and the output-space descent direction is $\tfrac{2w}{D}G=w\,G$.</p>
+
+<h4>The guided target and why the consistency force disappears</h4>
+<p>For every state $s_t$ visited by the ODE rollout of prompt $c$, freeze</p>
+<div class="math-block">\[ v^{\text{ART}}_{\text{tgt}}(s_t)=v^{(0)}_\theta(s_t)+G(c), \]</div>
+<p>where $v^{(0)}_\theta=v_{\text{old}}$ is the prediction <em>cached during the rollout</em>. No extra forward pass is needed: the sampler had to compute it anyway. The loss is $w(s_t)\operatorname{MSE}(v_\theta(s_t),v^{\text{ART}}_{\text{tgt}}(s_t))$. At $v_\theta=v^{(0)}_\theta$ its negative gradient is $\tfrac{2w}{D}G(c)$. Compare this with Proposition 1. NFT's force has the form $\mathbb E[(2r-1)(u_t-v_{\text{rvs}})\mid s_t]$, and the $u_t$ inside it is what produces $e$. ART's target contains $v^{(0)}_\theta$ (the reverse field itself) and $G$ (a constant), and nothing else. There is no $u_t$, so there is no $\mathbb E[u_t\mid s_t]$, so there is no $e$. The force is removed by construction, not by cancellation.</p>
+<p>Two more things change relative to NFT:</p>
+<ul>
+  <li><strong>States.</strong> ART trains on the states the sampler visited, as reverse-process RL does, not on re-noised endpoints. It inherits Flow-GRPO's on-trajectory supervision without needing a likelihood.</li>
+  <li><strong>Credit assignment.</strong> Each state receives an explicit vector, not a scalar advantage passed through a likelihood ratio along that step's own sampled noise.</li>
+</ul>
+
+<h4>The CFG analogy</h4>
+<p>Classifier-free guidance (Step 1) samples with $v=v(x_t,t,\varnothing)+w\,[v(x_t,t,c)-v(x_t,t,\varnothing)]$: it adds a direction to the velocity at sampling time. Distilling CFG means training a single model to output the guided velocity directly. The README describes DiffusionART the same way. The reward-improving direction plays the role of the guidance term, and the model learns to internalize it. The analogy is useful but loose. CFG's direction is statewise, a function of $x_t$ and $t$. $G(c)$ is a single vector shared by all states and all times of a prompt.</p>
+
+<h4>What a shared direction gives up</h4>
+<p>The exact statewise tilt direction at $s_t$ would be $\operatorname{Cov}(R,u_t\mid s_t)$, which varies with the state. Estimating it needs posterior samples of $x_0$ given $s_t$, which is expensive. $G(c)$ uses the $t=1$ (unconditional) value everywhere. The paper says plainly that "a prompt-level direction need not match the posterior guidance at every state" (Appendix B). That mismatch is why the second update and its statewise restoration exist (next section).</p>
+
+<figure class="widget" id="w4-tilt">
+  <canvas id="w4-tilt-canvas" aria-label="K samples from p_old, their rewards, the covariance guidance G(c) and the tilted mean"></canvas>
+  <div class="widget-controls">
+    <label for="w4-k">K <input type="range" id="w4-k" min="2" max="32" step="1" value="8"> <output id="w4-k-val">8</output></label>
+    <label for="w4-reward">Reward <select id="w4-reward">
+      <option value="target" selected>Near a target point</option>
+      <option value="linear">Linear: prefer upper right</option>
+      <option value="mode">Prefer the lower-right mode</option>
+      <option value="radial">Prefer far from origin</option>
+    </select></label>
+    <label for="w4-tau">τ·std(R) <input type="range" id="w4-tau" min="0" max="3" step="0.05" value="1"> <output id="w4-tau-val">1.00</output></label>
+    <label for="w4-pair"><input type="checkbox" id="w4-pair"> Pairwise labels</label>
+    <button type="button" id="w4-resample">Resample</button>
+  </div>
+  <p id="w4-readout" aria-live="polite"></p>
+  <figcaption>One prompt's rollout distribution $p_{\text{old}}$ (faint dots: a three-mode mixture) and $K$ samples colored by centered reward (green above the group mean, red below; opacity is magnitude). The vermilion arrow is $G(c)$ drawn from the sample mean; it always has unit RMS, so its length is $\sqrt2$. The teal dashed segment is the first-order prediction $\bar x+\tau\,\overline{\operatorname{Cov}}$, and the solid curve is the exact self-normalized tilted mean as $\tau$ grows from 0 to the slider value. The faint gray arrow is the population direction from 4,000 samples. Try $K=2$ against $K=32$ for estimation noise. "Prefer far from origin" shows that a mean shift cannot express a reward that wants spread. "Pairwise labels" replaces rewards by winner/loser labels on disjoint pairs; at $K=2$ the direction is identical to the scalar one.</figcaption>
+</figure>
+<script>(() => {
+  const root = document.getElementById('w4-tilt');
+  if (!root) return;
+  const canvas = root.querySelector('#w4-tilt-canvas');
+  const kIn = root.querySelector('#w4-k'), kOut = root.querySelector('#w4-k-val');
+  const rewSel = root.querySelector('#w4-reward');
+  const tauIn = root.querySelector('#w4-tau'), tauOut = root.querySelector('#w4-tau-val');
+  const pairIn = root.querySelector('#w4-pair');
+  const resBtn = root.querySelector('#w4-resample');
+  const readout = root.querySelector('#w4-readout');
+  const ctx = canvas.getContext('2d');
+
+  function rng32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+  function gauss(r) { let u = 0; while (u === 0) u = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); }
+  const MIX = [{ m: [-1.6, -0.6], s: 0.45, w: 0.4 }, { m: [1.3, -1.1], s: 0.4, w: 0.3 }, { m: [0.3, 1.5], s: 0.5, w: 0.3 }];
+  function sampleMix(r) { const u = r(); let acc = 0, c = MIX[MIX.length - 1]; for (const k of MIX) { acc += k.w; if (u < acc) { c = k; break; } } return [c.m[0] + c.s * gauss(r), c.m[1] + c.s * gauss(r)]; }
+  const TGT = [1.4, 1.3];
+  const REW = {
+    target: p => -((p[0] - TGT[0]) ** 2 + (p[1] - TGT[1]) ** 2),
+    linear: p => p[0] + p[1],
+    mode: p => Math.exp(-((p[0] - 1.3) ** 2 + (p[1] + 1.1) ** 2) / 0.5),
+    radial: p => Math.hypot(p[0], p[1])
+  };
+  const popR = rng32(12345); const POP = []; for (let i = 0; i < 4000; i++) POP.push(sampleMix(popR));
+  let seed = 7, SAMPLES = [];
+  function draw32() { const r = rng32(seed * 7919 + 1); SAMPLES = []; for (let i = 0; i < 32; i++) SAMPLES.push(sampleMix(r)); }
+  draw32();
+
+  function covOf(X, y) {
+    const n = X.length; let yb = 0, xb = [0, 0];
+    for (let i = 0; i < n; i++) { yb += y[i] / n; xb[0] += X[i][0] / n; xb[1] += X[i][1] / n; }
+    const c = [0, 0]; let vy = 0;
+    for (let i = 0; i < n; i++) { const dy = y[i] - yb; c[0] += dy * (X[i][0] - xb[0]) / n; c[1] += dy * (X[i][1] - xb[1]) / n; vy += dy * dy / n; }
+    const rms = Math.sqrt((c[0] * c[0] + c[1] * c[1]) / 2);
+    const G = rms > 1e-12 ? [c[0] / rms, c[1] / rms] : [0, 0];
+    return { yb, xb, c, rms, G, sd: Math.sqrt(vy) };
+  }
+  function tiltedMean(X, y, tau) {
+    let mx = -Infinity; for (const v of y) mx = Math.max(mx, tau * v);
+    let S = 0, a = 0, b = 0;
+    for (let i = 0; i < X.length; i++) { const w = Math.exp(tau * y[i] - mx); S += w; a += w * X[i][0]; b += w * X[i][1]; }
+    return [a / S, b / S];
+  }
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888'; }
+
+  function render() {
+    const dpr = window.devicePixelRatio || 1;
+    const W = Math.max(240, root.clientWidth || 600);
+    const H = Math.round(Math.min(W * 0.78, 460));
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const col = { fg: css('--fg'), muted: css('--muted'), line: css('--line'), bg: css('--bg'), surface: css('--surface'), acc: css('--accent'), acc2: css('--accent-2'), good: css('--good'), bad: css('--bad') };
+    ctx.fillStyle = col.surface; ctx.fillRect(0, 0, W, H);
+    const sc = Math.min(W, H) / 6.6, cx = W / 2, cy = H / 2;
+    const P = p => [cx + p[0] * sc, cy - p[1] * sc];
+
+    const pair = pairIn.checked;
+    let K = parseInt(kIn.value, 10);
+    if (pair && K % 2 === 1) K -= 1;
+    kOut.textContent = pair && K !== parseInt(kIn.value, 10) ? K + ' (even)' : String(K);
+    const f = REW[rewSel.value];
+    const X = SAMPLES.slice(0, K);
+    const R = X.map(f);
+    let y = R.slice();
+    if (pair) { for (let j = 0; j + 1 < K; j += 2) { const a = R[j], b = R[j + 1]; y[j] = a > b ? 1 : a < b ? 0 : 0.5; y[j + 1] = 1 - y[j]; } }
+    const st = covOf(X, y);
+    const pop = covOf(POP, POP.map(f));
+    const s = parseFloat(tauIn.value); tauOut.textContent = s.toFixed(2);
+    const tau = st.sd > 1e-12 ? s / st.sd : 0;
+
+    ctx.strokeStyle = col.line; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(W, cy); ctx.moveTo(cx, 0); ctx.lineTo(cx, H); ctx.stroke();
+    ctx.fillStyle = col.muted; ctx.globalAlpha = 0.18;
+    for (let i = 0; i < POP.length; i += 2) { const q = P(POP[i]); ctx.fillRect(q[0] - 1, q[1] - 1, 2, 2); }
+    ctx.globalAlpha = 1;
+    if (rewSel.value === 'target') { const q = P(TGT); ctx.strokeStyle = col.fg; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(q[0] - 6, q[1] - 6); ctx.lineTo(q[0] + 6, q[1] + 6); ctx.moveTo(q[0] + 6, q[1] - 6); ctx.lineTo(q[0] - 6, q[1] + 6); ctx.stroke(); }
+
+    function arrow(from, vec, color, width, dash, alpha) {
+      const a = P(from), b = P([from[0] + vec[0], from[1] + vec[1]]);
+      ctx.save(); ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.setLineDash([]);
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), L = 10;
+      if (Math.hypot(b[0] - a[0], b[1] - a[1]) > 4) { ctx.beginPath(); ctx.moveTo(b[0], b[1]); ctx.lineTo(b[0] - L * Math.cos(ang - 0.4), b[1] - L * Math.sin(ang - 0.4)); ctx.lineTo(b[0] - L * Math.cos(ang + 0.4), b[1] - L * Math.sin(ang + 0.4)); ctx.closePath(); ctx.fill(); }
+      ctx.restore();
+    }
+    arrow(pop.xb, pop.G, col.muted, 2, [], 0.6);
+
+    if (pair) {
+      ctx.strokeStyle = col.muted; ctx.lineWidth = 1;
+      for (let j = 0; j + 1 < K; j += 2) { const a = P(X[j]), b = P(X[j + 1]); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+    }
+    let maxDev = 1e-12; for (const v of y) maxDev = Math.max(maxDev, Math.abs(v - st.yb));
+    for (let i = 0; i < K; i++) {
+      const q = P(X[i]); const dv = y[i] - st.yb;
+      ctx.globalAlpha = 0.3 + 0.7 * Math.abs(dv) / maxDev;
+      ctx.fillStyle = Math.abs(dv) < 1e-12 ? col.muted : dv > 0 ? col.good : col.bad;
+      ctx.beginPath(); ctx.arc(q[0], q[1], 6, 0, 2 * Math.PI); ctx.fill();
+      ctx.globalAlpha = 1; ctx.strokeStyle = col.fg; ctx.lineWidth = 0.8; ctx.stroke();
+      if (pair) { ctx.fillStyle = col.fg; ctx.font = '11px system-ui, sans-serif'; ctx.fillText(y[i] === 1 ? 'W' : y[i] === 0 ? 'L' : 'T', q[0] + 8, q[1] - 6); }
+    }
+    const m0 = P(st.xb);
+    ctx.strokeStyle = col.fg; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(m0[0], m0[1], 7, 0, 2 * Math.PI); ctx.stroke();
+    arrow(st.xb, st.G, col.acc2, 3, [], 1);
+    arrow(st.xb, [tau * st.c[0], tau * st.c[1]], col.acc, 2, [6, 4], 1);
+    ctx.strokeStyle = col.acc; ctx.lineWidth = 2; ctx.beginPath();
+    let last = st.xb;
+    for (let k = 0; k <= 40; k++) { const m = tiltedMean(X, y, tau * k / 40); const q = P(m); if (k === 0) ctx.moveTo(q[0], q[1]); else ctx.lineTo(q[0], q[1]); last = m; }
+    ctx.stroke();
+    const lq = P(last); ctx.fillStyle = col.acc; ctx.beginPath(); ctx.arc(lq[0], lq[1], 5, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = col.acc2; ctx.font = '13px system-ui, sans-serif';
+    const tip = P([st.xb[0] + st.G[0], st.xb[1] + st.G[1]]); ctx.fillText('G(c)', tip[0] + 6, tip[1] - 6);
+    ctx.fillStyle = col.fg; ctx.fillText('mean', m0[0] + 9, m0[1] + 16);
+
+    const ang = (u, v) => { const nu = Math.hypot(u[0], u[1]), nv = Math.hypot(v[0], v[1]); if (nu < 1e-12 || nv < 1e-12) return NaN; return Math.acos(Math.max(-1, Math.min(1, (u[0] * v[0] + u[1] * v[1]) / (nu * nv)))) * 180 / Math.PI; };
+    const a = ang(st.G, pop.G);
+    let txt = (pair ? 'Pairwise labels; ' : '') + 'K = ' + K + '. Cov = (' + st.c[0].toFixed(3) + ', ' + st.c[1].toFixed(3) + '), RMS = ' + st.rms.toFixed(3) +
+      ', G(c) = (' + st.G[0].toFixed(3) + ', ' + st.G[1].toFixed(3) + '). Angle to population direction: ' + (isNaN(a) ? 'undefined (zero covariance)' : a.toFixed(1) + '°') +
+      '. Tilted mean at τ = ' + tau.toFixed(3) + ': (' + last[0].toFixed(2) + ', ' + last[1].toFixed(2) + ').';
+    if (pair) { const scal = covOf(X, R); const b = ang(st.G, scal.G); txt += ' Angle between pairwise and scalar G: ' + (isNaN(b) ? 'undefined' : b.toFixed(1) + '°') + '.'; }
+    readout.textContent = txt;
+  }
+  kIn.addEventListener('input', render); rewSel.addEventListener('change', render); tauIn.addEventListener('input', render); pairIn.addEventListener('change', render);
+  resBtn.addEventListener('click', () => { seed += 1; draw32(); render(); });
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', render); else if (mq.addListener) mq.addListener(render);
+  if (window.ResizeObserver) { let last = 0; new ResizeObserver(() => { const w = root.clientWidth; if (w !== last) { last = w; render(); } }).observe(root); }
+  render();
+})();</script>
+
+<div class="callout warn"><p class="callout-title">Pitfall</p><p>Unit-RMS normalization means $G(c)$ never shrinks. A prompt whose $K$ rewards differ only by reward-model noise still receives a full-size push, in a random direction. The repo handles the exactly-constant case explicitly (<code>zero_signal_mode</code> in <code>src/visual_rl/algorithms/covariance.py</code>), but near-constant rewards still yield unit guidance. Nothing in the objective says "stop": convergence relies on the push directions averaging out and on restoration.</p></div>
+
+<h3 id="s4-restore">§4.2 Two-update restoration</h3>
+
+<p>Instead of tuning an EMA, DiffusionART splits each rollout batch into two disjoint minibatches and takes one optimizer step on each. Let $v^{(0)}_\theta$ and $v^{(1)}_\theta$ be the fields before and after the first update. Both updates regress toward the <em>same frozen</em> target $v^{\text{ART}}_{\text{tgt}}=v^{(0)}_\theta+G(c)$. Per state, $\mathcal L_\theta(s_t)=w(s_t)\operatorname{MSE}(v_\theta(s_t),v^{\text{ART}}_{\text{tgt}}(s_t))$ with $\operatorname{MSE}(a,b)=D^{-1}\lVert a-b\rVert^2$, where $w$ combines timestep weighting and the mask. Let $d(s_t)=v_\theta(s_t)-v^{(0)}_\theta(s_t)$. Before each update:</p>
+<div class="math-block">\[ \begin{aligned}
+\text{update 1:}\quad &amp;\mathcal L^{(0)}=\tfrac wD\lVert G(c)\rVert^2, &amp;&amp; -\nabla_{v_\theta}\mathcal L\big|_{v^{(0)}_\theta}=\tfrac{2w}{D}\,G(c),\\
+\text{update 2:}\quad &amp;\mathcal L^{(1)}=\tfrac wD\lVert G(c)-d(s_t)\rVert^2, &amp;&amp; -\nabla_{v_\theta}\mathcal L\big|_{v^{(1)}_\theta}=\tfrac{2w}{D}\bigl(\underbrace{G(c)}_{\text{guidance}}\ \underbrace{-\,d(s_t)}_{\text{restoration}}\bigr).
+\end{aligned} \]</div>
+<p>The derivation is one line: $v^{(1)}_\theta-v^{\text{ART}}_{\text{tgt}}=(v^{(0)}_\theta+d)-(v^{(0)}_\theta+G)=d-G$. The second update keeps the original guidance and adds a pull back toward the rollout prediction whose strength is exactly the drift. Note that the drift $d(s_t)$ on the second minibatch was caused by an update computed on the <em>first</em> minibatch. These states were not in that batch, so their displacement is collateral movement from parameter sharing. This is the generalization behaviour that restoration controls.</p>
+
+<figure class="diagram">
+<svg viewBox="0 0 520 280" role="img" aria-label="Two-update geometry: first update pure guidance, second update guidance plus restoration">
+  <defs>
+    <marker id="s4-ah2-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent)"/></marker>
+    <marker id="s4-ah2-acc2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent-2)"/></marker>
+    <marker id="s4-ah2-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--bad)"/></marker>
+  </defs>
+  <circle cx="110" cy="230" r="6" style="fill:var(--fg)"/>
+  <text x="30" y="258" style="fill:var(--fg);font-size:13px">v_θ(0) = v_old (cached)</text>
+  <circle cx="110" cy="50" r="7" style="fill:var(--surface);stroke:var(--fg);stroke-width:1.5"/>
+  <text x="60" y="32" style="fill:var(--fg);font-size:13px">target v_θ(0) + G(c)</text>
+  <circle cx="380" cy="170" r="6" style="fill:var(--fg)"/>
+  <text x="392" y="190" style="fill:var(--fg);font-size:13px">v_θ(1)</text>
+  <line x1="110" y1="230" x2="110" y2="62" style="stroke:var(--accent);stroke-width:2.5" marker-end="url(#s4-ah2-acc)"/>
+  <text x="120" y="150" style="fill:var(--accent);font-size:12px">update 1: along G</text>
+  <line x1="380" y1="170" x2="122" y2="56" style="stroke:var(--accent-2);stroke-width:2.5" marker-end="url(#s4-ah2-acc2)"/>
+  <text x="250" y="96" style="fill:var(--accent-2);font-size:12px">update 2: along G − d</text>
+  <line x1="380" y1="170" x2="380" y2="60" style="stroke:var(--accent);stroke-width:1.5;stroke-dasharray:5 4" marker-end="url(#s4-ah2-acc)"/>
+  <text x="388" y="80" style="fill:var(--accent);font-size:12px">guidance G</text>
+  <line x1="380" y1="170" x2="125" y2="228" style="stroke:var(--bad);stroke-width:1.5;stroke-dasharray:5 4" marker-end="url(#s4-ah2-bad)"/>
+  <text x="235" y="232" style="fill:var(--bad);font-size:12px">restoration −d</text>
+</svg>
+<figcaption>Geometry of the two updates at one state, in the spirit of the paper's Figure 3(d). The first update sees no drift and moves along $G$. The second update starts from the displaced $v^{(1)}_\theta$ and moves along $G-d$, the sum of the unchanged guidance and a restoration proportional to the drift.</figcaption>
+</figure>
+
+<h4>Why this is better than NFT's two updates</h4>
+<p>NFT with two updates also gets restoration, and §3.2 showed it costs 15.2× in speed. The difference lies in the guidance. NFT's per-state guidance $(2r-1)h$ varies in sign and is noisy, so it cancels in parameter space and restoration takes over. ART's guidance is the <em>same</em> vector for every state of a prompt, so it aggregates coherently, just as restoration does. Guidance therefore remains dominant while restoration acts as a statewise brake that is weak where drift is small and strong where drift is large. There is no lag schedule and no $\beta$.</p>
+<p>The paper's ablation (Figure 6(b), OCR on SD3.5-M) compares three runs. <em>ART: 1 update</em> rises to about 0.95 within a few dozen steps, then deteriorates steadily, ending near 0.27 by step 800. <em>ART: 2 updates</em> reaches the same level and stays near 0.97 throughout. <em>NFT: 2 updates</em> with a carefully tuned $\beta=0.1$ learns, drops to near zero around step 270 and recovers. In the plotted curve it then falls to zero again around step 440 and stays there through step 800. The text describes only the first, brief collapse. Appendix B explains the single-update deterioration: a prompt-level direction need not match the posterior guidance at each state, and without statewise correction the deviations accumulate.</p>
+
+<div class="callout warn"><p class="callout-title">Pitfall</p><p>The two updates must be on <em>disjoint</em> minibatches of the <em>same</em> rollout, with guidance computed from the complete group of $K$ trajectories before splitting. The README recommends splitting within each prompt, so that both halves keep prompt coverage: for example, two batches of 32 prompts with $K/2$ trajectories each, not 16 prompts with $K$ each. It also warns that shrinking the update window to save memory creates more optimizer steps per rollout, which changes the restoration dynamics. Reduce the micro-batch and accumulate instead.</p></div>
+
+<h3 id="s4-mask">§4.3 Trust-region masking for ODE rollouts</h3>
+
+<h4>The problem: no KL for a deterministic sampler</h4>
+<p>Guidance acts in both updates, so one rollout batch can still produce an excessive policy change. PPO would limit this through the likelihood ratio. An ODE step, however, is deterministic, so its transition is a point mass and there is no finite KL between the old and new step. DiffusionART borrows Flow-GRPO's ODE-to-SDE construction <em>only as a measuring device</em>. Rollouts stay ODE trajectories; the SDE defines reference Gaussian transitions for the current and old policies:</p>
+<div class="math-block">\[ q_\theta(\cdot\mid s_t)=\mathcal N\bigl(\mu(s_t,v_\theta(s_t)),\sigma^2_{\text{ref}}(t)I\bigr),\qquad q_{\text{old}}(\cdot\mid s_t)=\mathcal N\bigl(\mu(s_t,v^{(0)}_\theta(s_t)),\sigma^2_{\text{ref}}(t)I\bigr). \]</div>
+<p>With reverse step $h=t-t_{\text{next}}&gt;0$ and $0&lt;t&lt;1$ (Appendix C, "Reference Transitions"):</p>
+<div class="math-block">\[ \mu(s_t,v)=x_t+h\Bigl[\Bigl(1+\tfrac{\nu^2}{2}\Bigr)v-\tfrac{\nu^2}{2(1-t)}x_t\Bigr],\qquad \sigma^2_{\text{ref}}(t)=\nu^2\,\tfrac{t}{1-t}\,h, \]</div>
+<p>with $\nu=0.8$. At $t=1$ the paper uses $\mu=x_t+hv$ and $\sigma^2_{\text{ref}}(1)=\nu^2$. The means differ only through $v$, so $\mu(s_t,v_\theta)-\mu(s_t,v^{(0)}_\theta)=h(1+\nu^2/2)\,d(s_t)$. The KL between two isotropic Gaussians with equal variance is $\lVert\Delta\mu\rVert^2/(2\sigma^2)$, and the per-coordinate KL proxy is</p>
+<div class="math-block">\[ m(s_t)=\frac1D D_{\text{KL}}\bigl(q_\theta\,\Vert\,q_{\text{old}}\bigr)=\frac{\lVert\mu(s_t,v_\theta)-\mu(s_t,v^{(0)}_\theta)\rVert^2}{2D\,\sigma^2_{\text{ref}}(t)}=\frac{h^2(1+\nu^2/2)^2\,\lVert d(s_t)\rVert^2}{2D\,\sigma^2_{\text{ref}}(t)}. \]</div>
+
+<h4>The mask: block large outward moves, keep inward corrections</h4>
+<div class="math-block">\[ w(s_t)=t\Bigl[1-\mathbf 1\{m(s_t)\ge\delta\}\;\mathbf 1\{\langle d(s_t),\,G(c)-d(s_t)\rangle&gt;0\}\Bigr],\qquad\delta=10^{-5}. \]</div>
+<ul>
+  <li>The first indicator detects <em>excessive drift</em>.</li>
+  <li>The second detects an <em>outward</em> update: the second update's descent direction $G-d$ has a positive component along the existing drift $d$, so taking the step would move the state further from the rollout policy.</li>
+  <li>A state is dropped only if both hold. A large drift whose update points back inward, $\langle d,G-d\rangle\le0$, is <em>kept</em>, because that update is restoration. The rule is inspired by Flow-DPPO.</li>
+  <li>The factor $t$ up-weights high-noise states. It is the <code>velocity_linear_sigma</code> loss weighting in <code>src/visual_rl/algorithms/art.py</code>.</li>
+</ul>
+<p>The mask is recomputed before each update and treated as a constant in backprop. At the first update $d=0$, so $m=0&lt;\delta$ and nothing is masked: in effect the mask constrains only the second update.</p>
+
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>This is PPO's clip in different clothes. PPO zeroes the gradient of a token when the ratio is already outside $[1-\epsilon,1+\epsilon]$ <em>in the direction the advantage pushes</em>, and keeps it when the gradient would move the ratio back inside. Here the "ratio" is the KL proxy $m$, and "the direction the advantage pushes" is the sign of $\langle d,G-d\rangle$. The main difference is that PPO's trust region is per token with a likelihood the sampler really has, whereas this one is per state with a likelihood borrowed from a reference SDE.</p></div>
+
+<h4>Worked example</h4>
+<p>Use the $G=(1.1767,0.7845)$ from the earlier example, a 10-step schedule ($h=0.1$), $t=0.5$, $D=2$, $\nu=0.8$. Then $\sigma^2_{\text{ref}}=0.64\cdot1\cdot0.1=0.064$ and $h(1+\nu^2/2)=0.132$.</p>
+<ul>
+  <li>$d=(0.4,0.1)$: $m=0.132^2\cdot0.17/(2\cdot2\cdot0.064)=0.0116\ge\delta$. $G-d=(0.777,0.685)$ and $\langle d,G-d\rangle=0.379&gt;0$, so the update is outward. <strong>Masked</strong> ($w=0$).</li>
+  <li>$d=(1.5,1.0)$ (overshoot): $m=0.221\ge\delta$, but $\langle d,G-d\rangle=-0.700&lt;0$, so the update is inward. <strong>Kept</strong>, with $w=t=0.5$: the second update pulls this state back.</li>
+  <li>$d=(0.01,0)$: $m=6.8\times10^{-6}&lt;\delta$. <strong>Kept</strong>.</li>
+</ul>
+<p>Solving $m=\delta$ for this $t$ and $h$ gives a threshold of $\operatorname{RMS}(d)\approx0.0086$ in velocity units, against velocities of order 1. In practice, any state with noticeable drift and an outward-pointing update is masked. $\delta$ acts nearly as a switch on the sign condition, and the threshold scales with $h$ and $t$.</p>
+
+<h4>Evidence for the mask</h4>
+<ul>
+  <li><strong>Video (HunyuanVideo-13B, VQ:MQ 1:1).</strong> The no-mask run drops around step 200 and then recovers; the masked run improves steadily. In the plotted curves the masked run reaches VQ near 15 by about step 300, while the unmasked run sits near 10–12.5 (Figure 8).</li>
+  <li><strong>Diagnostics.</strong> Over the shared first 300 steps, the maximum <em>first-update</em> gradient norm is 1.96 with masking and 3.33 without. The velocity drift measured before second updates shows much larger spikes without the mask. Masking the second update therefore also keeps later first updates well behaved.</li>
+  <li><strong>Images.</strong> On SD3.5-M (three tasks) and FLUX.1-dev, training stays effective without the mask and can improve slightly faster. The FLUX no-mask run reaches a training GenEval of 0.971 by step 180. The mask is a stability safeguard that matters more for video.</li>
+</ul>
+
+<h3 id="s4-pairwise">§4.4 Pairwise reward models</h3>
+
+<p>Visual quality has no verifier, so preferences between pairs are a natural reward signal. DiffusionART-Pairwise splits each prompt's $K$ endpoints into $M=K/2$ disjoint pairs. It queries a pairwise judge and assigns labels $y_i=1$ to winners and $y_i=0$ to losers, or $y_i=\tfrac12$ to both for a tie. The labels replace $R_i$ in the otherwise unchanged covariance. Everything downstream (normalization, targets, two updates, mask) is identical.</p>
+
+<h4>The pairwise covariance identity (Appendix C)</h4>
+<p>Every pair's labels average to $\tfrac12$ (including ties), so the global label mean is $\tfrac12$. Because $\sum_i(y_i-\tfrac12)=0$, subtracting $\bar x_{0,c}$ changes nothing:</p>
+<div class="math-block">\[ \overline{\operatorname{Cov}}=\frac1K\sum_{i=1}^K\bigl(y_i-\tfrac12\bigr)\bigl(x_0^{(i)}-\bar x_{0,c}\bigr)=\frac1K\sum_{i=1}^K\bigl(y_i-\tfrac12\bigr)x_0^{(i)}=\frac{1}{2K}\sum_{j\ \text{non-tied}}\bigl(x^{\text{win}}_{0,j}-x^{\text{lose}}_{0,j}\bigr). \]</div>
+<p>A winner contributes $+\tfrac12x^{\text{win}}$, a loser $-\tfrac12x^{\text{lose}}$, and a tie contributes zero. A single pair's own covariance, with denominator 2, is $\tfrac14(x^{\text{win}}-x^{\text{lose}})$, and averaging $M$ of these gives the same expression with coefficient $\tfrac{1}{4M}=\tfrac{1}{2K}$. The coefficient disappears after RMS normalization. For $K=2$:</p>
+<div class="math-block">\[ G(c)=\frac{x^{\text{win}}_0-x^{\text{lose}}_0}{\operatorname{RMS}(x^{\text{win}}_0-x^{\text{lose}}_0)}, \]</div>
+<p>a unit-RMS vector from the worse sample to the better one, and zero for a tie.</p>
+<p>One consequence the paper does not state: for $K=2$ with <em>scalar</em> rewards, $\overline{\operatorname{Cov}}=\tfrac14(R_1-R_2)(x_1-x_2)$, which after normalization is the same vector. At $K=2$, scalar DiffusionART and DiffusionART-Pairwise produce identical guidance whenever the judge agrees with the reward's ordering. The widget shows a 0.0° angle between them at $K=2$.</p>
+
+<h4>Evidence</h4>
+<div class="table-wrap"><table>
+  <caption>VQ-only evaluation and GPU hours at step 400, HunyuanVideo-13B (paper Table 1).</caption>
+  <thead><tr><th>Method</th><th>GPU hours ↓</th><th>VQ ↑</th></tr></thead>
+  <tbody>
+    <tr><td>Scalar, $K=8$</td><td>891.1</td><td><strong>13.637</strong></td></tr>
+    <tr><td>Pairwise, $K=2$</td><td><strong>260.8</strong></td><td>12.235</td></tr>
+    <tr><td>Pairwise, $K=4$</td><td>465.6</td><td>10.883</td></tr>
+    <tr><td>Pairwise, $K=8$</td><td>883.3</td><td>12.092</td></tr>
+  </tbody>
+</table></div>
+<p>Pairwise $K=2$ reaches 12.235, no lower than the 12.092 of $K=8$, at 260.8 instead of 883.3 GPU hours (3.4× fewer) over the same 400 steps. A second experiment (Appendix C, FLUX GenEval, 24 images per prompt forming 12 pairs) compares <em>prompt-global</em> guidance, which pools the pair covariances before normalizing, with <em>pair-local</em> guidance, which normalizes each pair separately and applies it only to that pair. At step 400 prompt-global reaches a held-out GenEval of <strong>0.91</strong> and pair-local <strong>0.78</strong>. Pooling reduces variance.</p>
+<div class="callout warn"><p class="callout-title">Pitfall</p><p>In the repository, the pairwise labels are produced by comparing <em>scalar</em> scores (<code>art_pairwise_covariance</code> in <code>src/visual_rl/algorithms/covariance.py</code>). The pairwise experiments therefore measure what is lost by binarizing a scalar reward into win/loss labels. They do not test a separately trained pairwise judge, whose noise and intransitivity could behave differently.</p></div>
+
+<h3 id="s4-algorithm">The full algorithm</h3>
+
+<p>The paper's Algorithm 1, reproduced exactly. Equation 5 is the boxed covariance estimator in §4.1 above.</p>
+<div class="table-wrap"><table>
+  <caption>Algorithm 1: DiffusionART, one training iteration.</caption>
+  <tbody>
+    <tr><td colspan="2"><strong>Rollout stage</strong></td></tr>
+    <tr><td>1</td><td>Sample with an ODE solver using $v_\theta^{(0)}=v_\theta$.<br>For each prompt $c$, collect $K$ endpoints with rewards $R$, states $s_t$, and predictions $v_\theta^{(0)}(s_t)$.</td></tr>
+    <tr><td>2</td><td>Compute $G(c)$ by Equation 5 for each prompt $c$.</td></tr>
+    <tr><td>3</td><td>Freeze $v_{\mathrm{tgt}}^{\mathrm{ART}}(s_t)=v_\theta^{(0)}(s_t)+G(c)$ for each state $s_t$ of prompt $c$.</td></tr>
+    <tr><td colspan="2"><strong>Training stage</strong></td></tr>
+    <tr><td>4</td><td>Split the samples into two equal-sized disjoint minibatches $B_1,B_2$.</td></tr>
+    <tr><td>5</td><td>For each $B\in\{B_1,B_2\}$, recompute $w(s_t)$ and update $\theta$ with one step on<br>$\mathcal L(B;\theta)=\dfrac{1}{|B|}\sum_{s_t\in B}w(s_t)\operatorname{MSE}\bigl(v_\theta(s_t),v_{\mathrm{tgt}}^{\mathrm{ART}}(s_t)\bigr)$.</td></tr>
+  </tbody>
+</table></div>
+
+<p>Line by line:</p>
+<ol>
+  <li><strong>Line 1.</strong> Roll out with the deterministic ODE sampler of the <em>current</em> policy, so $v^{(0)}_\theta=v_\theta$: there is no separate old or EMA copy. Store, for each visited state, the latent $x_t$, the time $t$, the step size and the velocity the sampler used. That cached velocity is $v^{(0)}_\theta(s_t)$, and reusing it saves the extra old-policy forward pass on re-noised states that NFT needs. Rewards are black-box calls on the endpoints. Unlike Flow-GRPO, the sampler is not converted to an SDE, so samples come from the model's actual inference sampler.</li>
+  <li><strong>Line 2.</strong> One reduction per prompt over its <em>complete</em> group of $K$: center rewards and endpoints, average their products, divide by RMS. With several reward models, combine their weighted contributions before normalizing (README); normalizing each separately changes their relative influence.</li>
+  <li><strong>Line 3.</strong> Every state on every one of the prompt's $K$ trajectories gets the same offset $G(c)$ added to its cached velocity. Targets are frozen tensors.</li>
+  <li><strong>Line 4.</strong> Two equal, disjoint halves, preferably split within each prompt.</li>
+  <li><strong>Line 5.</strong> Before each update, run the current model on the half's states to get $v_\theta$ and compute $d=v_\theta-v^{(0)}_\theta$, the KL proxy $m$ and the outward test. Then set $w=t$ or 0 and take one optimizer step on the weighted MSE. For $B_1$, $d=0$ and $w=t$ everywhere. For $B_2$, the first step has moved the model, so the mask and the restoration term are live.</li>
+</ol>
+<p>Algorithm 2 (Pairwise) is identical except that line 2 becomes three lines: form $M=K/2$ disjoint pairs and query the pairwise reward model; assign $y_i\in\{1,0,\tfrac12\}$; compute the covariance with $y_i$ in place of $R_i$.</p>
+
+<figure class="diagram">
+<svg viewBox="-24 0 784 330" role="img" aria-label="DiffusionART pipeline from ODE rollout to two masked updates">
+  <defs>
+    <marker id="s4-ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--fg)"/></marker>
+    <marker id="s4-ah3-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/></marker>
+  </defs>
+  <rect x="10" y="20" width="165" height="95" rx="8" style="fill:var(--surface);stroke:var(--line)"/>
+  <text x="22" y="42" style="fill:var(--fg);font-size:13px;font-weight:600">1 · ODE rollout</text>
+  <text x="22" y="62" style="fill:var(--fg);font-size:12px">K samples per prompt</text>
+  <text x="22" y="80" style="fill:var(--fg);font-size:12px">cache x_t, t, v_θ(0)(s_t)</text>
+  <text x="22" y="98" style="fill:var(--muted);font-size:12px">no SDE, no old copy</text>
+  <rect x="200" y="20" width="165" height="95" rx="8" style="fill:var(--surface);stroke:var(--line)"/>
+  <text x="212" y="42" style="fill:var(--fg);font-size:13px;font-weight:600">2 · Rewards</text>
+  <text x="212" y="62" style="fill:var(--fg);font-size:12px">R_i = R(x0_i, c)</text>
+  <text x="212" y="80" style="fill:var(--fg);font-size:12px">black box, or pairwise</text>
+  <text x="212" y="98" style="fill:var(--fg);font-size:12px">labels 1 / 0 / 0.5</text>
+  <rect x="390" y="20" width="165" height="95" rx="8" style="fill:var(--surface);stroke:var(--accent-2);stroke-width:1.5"/>
+  <text x="402" y="42" style="fill:var(--accent-2);font-size:13px;font-weight:600">3 · Aggregate</text>
+  <text x="402" y="62" style="fill:var(--fg);font-size:12px">Cov(R, x0 | c) over K</text>
+  <text x="402" y="80" style="fill:var(--fg);font-size:12px">G(c) = Cov / RMS(Cov)</text>
+  <text x="402" y="98" style="fill:var(--muted);font-size:12px">one vector per prompt</text>
+  <rect x="580" y="20" width="170" height="95" rx="8" style="fill:var(--surface);stroke:var(--accent-2);stroke-width:1.5"/>
+  <text x="592" y="42" style="fill:var(--accent-2);font-size:13px;font-weight:600">4 · Guided targets</text>
+  <text x="592" y="62" style="fill:var(--fg);font-size:12px">every visited s_t:</text>
+  <text x="592" y="80" style="fill:var(--fg);font-size:12px">v_θ(0)(s_t) + G(c)</text>
+  <text x="592" y="98" style="fill:var(--muted);font-size:12px">frozen</text>
+  <line x1="175" y1="67" x2="197" y2="67" style="stroke:var(--fg);stroke-width:1.5" marker-end="url(#s4-ah3)"/>
+  <line x1="365" y1="67" x2="387" y2="67" style="stroke:var(--fg);stroke-width:1.5" marker-end="url(#s4-ah3)"/>
+  <line x1="555" y1="67" x2="577" y2="67" style="stroke:var(--fg);stroke-width:1.5" marker-end="url(#s4-ah3)"/>
+  <line x1="665" y1="115" x2="665" y2="177" style="stroke:var(--fg);stroke-width:1.5" marker-end="url(#s4-ah3)"/>
+  <rect x="580" y="180" width="170" height="80" rx="8" style="fill:var(--surface);stroke:var(--line)"/>
+  <text x="592" y="202" style="fill:var(--fg);font-size:13px;font-weight:600">5 · Split</text>
+  <text x="592" y="222" style="fill:var(--fg);font-size:12px">disjoint halves B1, B2</text>
+  <text x="592" y="240" style="fill:var(--muted);font-size:12px">within each prompt</text>
+  <rect x="320" y="180" width="235" height="80" rx="8" style="fill:var(--surface);stroke:var(--accent);stroke-width:1.5"/>
+  <text x="332" y="202" style="fill:var(--accent);font-size:13px;font-weight:600">Update 1 on B1</text>
+  <text x="332" y="222" style="fill:var(--fg);font-size:12px">d = 0, mask inactive</text>
+  <text x="332" y="240" style="fill:var(--fg);font-size:12px">force along t · G(c)</text>
+  <rect x="10" y="180" width="285" height="80" rx="8" style="fill:var(--surface);stroke:var(--accent-2);stroke-width:1.5"/>
+  <text x="22" y="202" style="fill:var(--accent-2);font-size:13px;font-weight:600">Update 2 on B2</text>
+  <text x="22" y="222" style="fill:var(--fg);font-size:12px">force along w · (G(c) − d): guidance + restoration</text>
+  <text x="22" y="240" style="fill:var(--fg);font-size:12px">w = 0 if KL proxy ≥ δ and ⟨d, G − d⟩ &gt; 0</text>
+  <line x1="580" y1="220" x2="558" y2="220" style="stroke:var(--fg);stroke-width:1.5" marker-end="url(#s4-ah3)"/>
+  <line x1="320" y1="220" x2="298" y2="220" style="stroke:var(--fg);stroke-width:1.5" marker-end="url(#s4-ah3)"/>
+  <path d="M90,260 L90,300 L-12,300 L-12,67 L7,67" style="fill:none;stroke:var(--muted);stroke-width:1.5;stroke-dasharray:5 4" marker-end="url(#s4-ah3-m)"/>
+  <text x="100" y="304" style="fill:var(--muted);font-size:12px">next iteration rolls out with the updated θ (no EMA)</text>
+</svg>
+<figcaption>The DiffusionART pipeline. Vermilion boxes are the new ingredients. The trust-region mask acts only in update 2, because $d=0$ at update 1.</figcaption>
+</figure>
+
+<p>The same iteration as algorithm-level pseudocode, in the paper's sign convention. The repo's loss (<code>src/visual_rl/algorithms/art.py</code>) uses the SD3/diffusers convention, in which the network predicts $\epsilon-x_0=-v$. There the target is written <code>old_velocity - displacement</code>, which is $v^{(0)}+G$ after flipping signs. Step 5 walks through that code.</p>
+<figure class="code">
+  <figcaption><span class="tag">pseudocode · algorithm level</span> One DiffusionART iteration</figcaption>
+  <pre><code class="language-python">{{CODE:pseudo}}</code></pre>
+</figure>
+
+<h3 id="s4-toy">The diagnosis in miniature: a 2D toy</h3>
+
+<p>The toy below reproduces the paper's two diagnoses and the method on a problem small enough to run in under a minute on a laptop CPU. The base model is a 2D rectified-flow MLP pretrained on an 8-Gaussian ring (radius 2, std 0.15). It is conditioned on a "prompt" $c\in\{0,\dots,7\}$ that it initially ignores. Prompt $c$'s reward is $R(x,c)=-\lVert x-\text{mode}_c\rVert^2$, so each prompt must learn to send its samples to a different mode. Each iteration uses 128 trajectories of 10 Euler steps, Adam at learning rate $10^{-3}$, and 400 iterations. Six variants are compared: ART with 2 updates and with 1 update, on-policy NFT ($\beta=1$, no EMA, one update), NFT with two disjoint updates (restoration, no EMA), and NFT positive-only and negative-only.</p>
+<p>The diagnostic <code>consistency_diag</code> computes Proposition 1's quantities for prompt 1. It draws 4,096 endpoints from the current sampler, forms forward-noised states, and computes the exact posterior $Q_{\text{old}}(x_0\mid s_t)$ over those endpoints with Gaussian kernels. From that it gets $v^{\text{old}}_{\text{fwd}}$, $q$, $g$ and $e=v^{\text{old}}_{\text{fwd}}-v_\theta$. It reports the RMS of $2g$ and of $(2q-1)e$, and the mean $\lvert2q-1\rvert$ at high and low noise.</p>
+
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Part 1: data, model, ODE rollout and covariance guidance (<code>tutorial/scratch/step4/toy_art_vs_nft.py</code>, lines 1–45)</figcaption>
+  <pre><code class="language-python">{{CODE:toy1}}</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Part 2: one DiffusionART iteration and one NFT iteration (lines 46–90)</figcaption>
+  <pre><code class="language-python">{{CODE:toy2}}</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Part 3: Proposition 1 diagnostic, evaluation and driver (lines 91–143). Run as <code>python toy_art_vs_nft.py 2</code> or <code>... 8</code> for K.</figcaption>
+  <pre><code class="language-python">{{CODE:toy3}}</code></pre>
+</figure>
+
+<p>Real output with $K=2$ (64 prompt groups per iteration; lines elided for length, about 22 s on CPU). <code>R</code> is the mean reward over 4,096 samples (optimum 0); <code>hit</code> is the fraction landing within 0.5 of their prompt's mode; <code>maxgrad</code> is the largest pre-clip gradient norm since the previous printed line.</p>
+<pre><code class="language-text">{{OUT:K2}}</code></pre>
+
+<p>What this shows:</p>
+<ul>
+  <li><strong>The time dependence of $q$ reproduces.</strong> At initialization, $\lvert2q-1\rvert$ averages 0.18 at high noise and 0.75 at low noise, exactly the pattern §3.1 predicts.</li>
+  <li><strong>On-policy NFT is destroyed by the consistency residual.</strong> Between iterations 50 and 150 the RMS of $(2q-1)e$ grows from 0.374 to 29.3 while $2g$ stays between 0.6 and 0.83. The gradient norm spikes from about 1 to $1.17\times10^3$, the reward collapses to $-30.8$, and the run later diverges to infinity. This is the paper's Figure 3(a) story: a gradient-norm spike, then collapse.</li>
+  <li><strong>The branch puzzle half-reproduces.</strong> Negative-only diverges within 50 iterations, matching the paper. Positive-only does <em>not</em> collapse here; it is just slow ($-2.76$ at iteration 400). In 2D, positive-only NFT behaves like reward-weighted flow matching on the model's own samples, which is benign. The paper's positive-only collapse on SD3.5-M is not reproduced by this toy.</li>
+  <li><strong>NFT with two updates is not rescued here.</strong> Its restoration is not enough at $K=2$ and $\beta=1$: it diverges around iteration 200. The paper's two-update NFT survived, at a 15.2× slowdown, on a different task and scale.</li>
+  <li><strong>ART is stable and fast.</strong> With 2 updates it reaches hit rate 1.00 by iteration 100 and stays there with a small gradient norm. With 1 update it also learns quickly but drifts slightly worse afterwards ($-0.0141$ at 100, then $-0.0242$ at 400), a mild version of the paper's single-update deterioration.</li>
+  <li><strong>ART does not care about $e$.</strong> ART's $\lvert e\rvert$ grows to about 5, far larger than NFT's. ART's sampler becomes very <em>inconsistent</em> with flow matching on its own outputs, yet it optimizes the reward cleanly, because its update never references $v_{\text{fwd}}$. The corollary is a caveat: ART does not train off-trajectory, forward-noised states at all, so the field away from the sampler's paths is left unconstrained.</li>
+</ul>
+
+<p>The same script with $K=8$ (16 groups per iteration) gives a less flattering picture:</p>
+<pre><code class="language-text">{{OUT:K8}}</code></pre>
+<p>At $K=8$, on-policy NFT is stable and converges, two-update NFT and positive-only NFT end closest to the optimum, ART with 1 update overshoots badly (reward $-54.4$ at iteration 100) before recovering, and ART with 2 updates is slow (hit 0.62 at iteration 400). This does not contradict the paper's large-scale results, but it is a real limitation of a <em>shared, prompt-level</em> direction. Here $p_{\text{old}}$ for each prompt is an 8-mode ring, and improving the reward means <em>moving mass between modes</em>. A single translation $G(c)$ applied to every trajectory moves all eight modes together, which is the wrong shape of update. With $K=2$, each pair's $G$ is the direction from one sample to the other, local to those two trajectories, so the update behaves more like a per-pair correction. This is my reading of the toy, not a claim from the paper. The paper's FLUX experiment found the opposite preference (prompt-global pooling beat pair-local, 0.91 against 0.78), presumably because variance reduction dominates there. Which effect wins depends on how multimodal $p_{\text{old}}(x_0\mid c)$ is and how noisy the rewards are.</p>
+
+<p>Finally, the trust-region mask. This short driver reruns ART (2 updates) with $\delta=10^{-5}$, $\delta=10^{-3}$ and no mask:</p>
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU</span> Mask sensitivity (<code>tutorial/scratch/step4/maskcheck.py</code>)</figcaption>
+  <pre><code class="language-python">{{CODE:maskcheck}}</code></pre>
+</figure>
+<pre><code class="language-text">{{OUT:mask}}</code></pre>
+<p>Columns are reward/hit at iterations 0, 100, 200, 300 and 400. At $K=2$ the masked run stays at the optimum. Without the mask, it gets close to the optimum ($-0.026$ at iteration 100) and then degrades to $-0.616$ at iteration 300: a miniature of the video no-mask dip. About 18% of second-update states are masked at $\delta=10^{-5}$. At $K=8$ the mask helps less clearly, and all variants are slow, as discussed above.</p>
+
+<h3 id="s4-experiments">§5 Experiments</h3>
+
+<h4>Setups</h4>
+<div class="table-wrap"><table>
+  <caption>Experimental setups as stated in the paper.</caption>
+  <thead><tr><th>Setting</th><th>Model and training</th><th>Rollouts</th><th>Rewards</th></tr></thead>
+  <tbody>
+    <tr><td>T2I</td><td>SD3.5-M; LoRA rank 32, α 64; 512×512; lr $3\times10^{-4}$; no CFG, no KL</td><td>10-step ODE; $K$ not stated in the main text</td><td>GenEval, OCR, PickScore; multi-reward GenEval + PickScore + CLIPScore + HPSv2.1</td></tr>
+    <tr><td>T2I, scale</td><td>FLUX.1-dev (12B); same LoRA recipe; built-in guidance embedding 3.5, no extra CFG</td><td>6-step</td><td>GenEval</td></tr>
+    <tr><td>T2V</td><td>HunyuanVideo-13B, CFG-distilled; all parameters; lr $10^{-5}$; no KL</td><td>32 prompts × 8 videos ($K=8$); 53 frames, 480×480, 8 FPS; 16 steps</td><td>VideoReward at 4 FPS; TA:VQ:MQ = 7:2:1 (also VQ:MQ = 1:1); 400 steps</td></tr>
+    <tr><td>I2V</td><td>Wan2.1-I2V-14B, CFG- and step-distilled (LightX2V); all parameters; lr $10^{-5}$; no KL</td><td>32 prompts with FLUX.1-dev reference images × 8 videos; 53 frames, 400×640, 8 FPS; 4 steps</td><td>VQ:MQ = 1:1</td></tr>
+  </tbody>
+</table></div>
+<p>Baselines are Flow-GRPO, Flow-GRPO-Fast (CPS), DanceGRPO, Flow-DPPO, DiffusionNFT (EMA) and DiffusionNFT (on-policy). On SD3.5-M, DiffusionNFT uses its original per-task hyperparameters. On FLUX it keeps $\beta=1$ and EMA decay $\min(0.001n,0.5)$ from the SD3.5-M GenEval baseline, deliberately not retuned. TA, VQ and MQ are VideoReward's text alignment, visual quality and motion quality heads.</p>
+
+<h4>Main results</h4>
+<p><strong>SD3.5-M</strong> (Figure 5; per-reward multi-reward curves in Figure 9). Single- and multi-reward training behave similarly. Without per-task EMA tuning, DiffusionART avoids the collapse of DiffusionNFT (on-policy) and is about as efficient as DiffusionNFT (EMA). It reaches Flow-GRPO's step-500 reward with <strong>10.0×</strong>, <strong>5.2×</strong> and <strong>9.6×</strong> fewer training steps on GenEval, OCR and PickScore.</p>
+
+<div class="table-wrap"><table>
+  <caption>FLUX.1-dev GenEval evaluation at step 500 (paper Table 2).</caption>
+  <thead><tr><th>Method</th><th>Eval reward</th></tr></thead>
+  <tbody>
+    <tr><td>Flow-GRPO-Fast</td><td>0.8374</td></tr>
+    <tr><td>Flow-DPPO</td><td>0.9183</td></tr>
+    <tr><td>DiffusionNFT (EMA)</td><td>0.8490</td></tr>
+    <tr><td><strong>DiffusionART</strong></td><td><strong>0.9684</strong></td></tr>
+  </tbody>
+</table></div>
+<p>In the FLUX training curves (Figure 6(a)), DiffusionART climbs to about 0.87 within roughly 75 steps and ends near 0.97. The un-retuned DiffusionNFT (EMA) peaks near 0.80 around step 250, drops to about 0.69 and finishes near 0.76.</p>
+
+<div class="table-wrap"><table>
+  <caption>T2V evaluation, HunyuanVideo-13B, matched TA:VQ:MQ = 7:2:1 (paper Table 3).</caption>
+  <thead><tr><th>Method</th><th>VQ ↑</th><th>MQ ↑</th><th>TA ↑</th></tr></thead>
+  <tbody>
+    <tr><td>Pretrained</td><td>5.195</td><td>1.943</td><td>1.118</td></tr>
+    <tr><td>Flow-GRPO-Fast</td><td>3.149</td><td>1.874</td><td>1.667</td></tr>
+    <tr><td>DanceGRPO</td><td>3.922</td><td>1.206</td><td>1.685</td></tr>
+    <tr><td>DiffusionNFT (EMA)</td><td>6.827</td><td>2.683</td><td>2.096</td></tr>
+    <tr><td>DiffusionNFT (on-policy)</td><td>5.543</td><td>1.839</td><td>−4.480</td></tr>
+    <tr><td><strong>DiffusionART</strong></td><td><strong>8.970</strong></td><td><strong>4.224</strong></td><td><strong>2.111</strong></td></tr>
+  </tbody>
+</table></div>
+<p>Over the strongest baseline, DiffusionNFT (EMA), evaluation VQ improves by 31.4% (8.970/6.827) and MQ by 57.4% (4.224/2.683), with TA comparable (2.111 against 2.096). Note that Flow-GRPO-Fast and DanceGRPO end <em>below</em> the pretrained VQ under these weights, and on-policy NFT's TA falls to −4.480.</p>
+
+<div class="table-wrap"><table>
+  <caption>I2V evaluation, Wan2.1-I2V-14B, VQ:MQ = 1:1 (paper Table 4).</caption>
+  <thead><tr><th>Method</th><th>VQ ↑</th><th>MQ ↑</th></tr></thead>
+  <tbody>
+    <tr><td>Flow-GRPO-Fast</td><td>5.771</td><td>4.710</td></tr>
+    <tr><td>DanceGRPO</td><td>5.123</td><td>3.266</td></tr>
+    <tr><td>DiffusionNFT (EMA)</td><td>5.516</td><td>4.161</td></tr>
+    <tr><td><strong>DiffusionART</strong></td><td><strong>11.196</strong></td><td><strong>10.476</strong></td></tr>
+  </tbody>
+</table></div>
+<p>The paper attributes DiffusionNFT's early plateau on I2V, which persists through 400 updates, to the residual consistency force diluting guidance after gradient aggregation. That is an interpretation; the paper does not measure the force in this run.</p>
+
+<h4>Speed: steps and GPU hours to a reward level</h4>
+<div class="table-wrap"><table>
+  <caption>Time-to-target comparisons reported in §5 and Appendix A. "—" means not reached within the recorded trajectory.</caption>
+  <thead><tr><th>Setting</th><th>Target</th><th>DiffusionART</th><th>Baseline</th><th>Speedup</th></tr></thead>
+  <tbody>
+    <tr><td>T2V 7:2:1</td><td>VQ 5.5</td><td>24 steps, 63.4 GPU h</td><td>NFT (EMA): 273 steps, 1,401.4 GPU h</td><td>11.4× steps, 22.1× GPU h</td></tr>
+    <tr><td>T2V 7:2:1</td><td>VQ 6 / MQ 3</td><td>29 / 46 steps</td><td>Fast, DanceGRPO, NFT (EMA): —</td><td>—</td></tr>
+    <tr><td>T2V 1:1</td><td>VQ 6</td><td>20 steps, 44.2 GPU h</td><td>NFT (EMA): 50 steps, 250.2 GPU h; Fast: 427 steps, 502.5 GPU h; DanceGRPO: 821 steps, 1,805.5 GPU h</td><td>2.5× / 21.4× steps; 5.7× / 11.4× GPU h (vs NFT / Fast)</td></tr>
+    <tr><td>T2V 1:1</td><td>MQ 3</td><td>19 steps, 42.9 GPU h</td><td>NFT: 33 steps, 165.6 GPU h; Fast: 117 steps, 149.4 GPU h</td><td>1.7× / 6.2× steps; 3.9× / 3.5× GPU h</td></tr>
+    <tr><td>T2V 1:1</td><td>late-stage mean of (VQ+MQ)/2</td><td colspan="2">mean over final 50 steps: 13.018 vs 10.105 (NFT EMA) and 8.510 (Fast)</td><td>12.02× / 11.72× GPU h; +28.8% / +53.0%</td></tr>
+    <tr><td>I2V 1:1</td><td>MQ 6</td><td>45.8 GPU h</td><td>Fast: 220.3 GPU h</td><td>4.8× GPU h</td></tr>
+    <tr><td>T2V pairwise</td><td>400 steps</td><td>$K=2$: 260.8 GPU h</td><td>$K=8$: 883.3 GPU h</td><td>3.4× GPU h</td></tr>
+  </tbody>
+</table></div>
+<p>Step speedups and GPU-hour speedups differ because the methods cost different amounts per step. ART reuses cached rollout predictions and needs no old-policy forward pass on re-noised states. Flow-GRPO-Fast trains on only some of the steps.</p>
+
+<h4>Ablations and what each result supports</h4>
+<div class="table-wrap"><table>
+  <thead><tr><th>Result</th><th>Supports</th><th>Strength</th></tr></thead>
+  <tbody>
+    <tr><td>Positive-only and negative-only NFT collapse; joint learns (Fig. 2a, GenEval)</td><td>Each branch carries an uncancelled non-reward force</td><td>Consistent with Prop. 1, but $e$ and $q$ are not measured; one task</td></tr>
+    <tr><td>EMA rollouts without anchor collapse (Fig. 3b)</td><td>Off-policy data alone does not stabilize; the anchor does</td><td>Clean intervention; one task</td></tr>
+    <tr><td>Two-update NFT survives but is 15.2× slower (Fig. 3a)</td><td>Restoration stabilizes, and is costly in NFT</td><td>Clear; "over the observed training window"</td></tr>
+    <tr><td>Restoration: 9.4× smaller output RMS, 4.9× larger parameter gradient (Fig. 3c)</td><td>Incoherent guidance cancels; restoration dominates</td><td>Measured; mechanism left to future work</td></tr>
+    <tr><td>ART 1 update deteriorates, ART 2 updates stable, NFT 2 updates ($\beta=0.1$) collapses (Fig. 6b, OCR)</td><td>Both guidance type and restoration matter</td><td>Strong qualitative contrast; single runs</td></tr>
+    <tr><td>Mask removal: video dips near step 200; images unaffected or slightly faster</td><td>Mask is a safeguard, mostly for video</td><td>Clear for video; diagnostics support it</td></tr>
+    <tr><td>Pairwise $K=2$ ≈ $K=8$; scalar $K=8$ best</td><td>Small $K$ suffices; binarized feedback loses little</td><td>No error bars; $K=4$ (10.883) below both, which suggests run-to-run noise</td></tr>
+    <tr><td>Prompt-global vs pair-local pairing (0.91 vs 0.78)</td><td>Pool pairs before normalizing</td><td>One task</td></tr>
+    <tr><td>Versus ReFL (differentiable reward, $K=1$) under VQ:MQ 1:1</td><td>ART improves both rewards with fewer optimizer updates without reward gradients</td><td>Plotted only, no table</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="s4-critical">Critical reading</h3>
+
+<h4>Assumptions</h4>
+<ul>
+  <li><strong>The theory is at the on-policy point and in expectation.</strong> Proposition 1 holds at $v_\theta=v^{\text{old}}_{\text{rvs}}$ with exact conditional expectations. Practical NFT uses one-sample estimates per state, and after the first step of an epoch it is no longer at $d=0$. The decomposition is not measured in the paper's experiments; Figure 2(b) is a schematic. (The toy above measures it in 2D.)</li>
+  <li><strong>Clipping is ignored.</strong> Statements such as "$q=1/2$ at $t=1$" and "$g$ is a positive multiple of $\operatorname{Cov}(R,x_0)$" need the unclipped goodness. NFT clips.</li>
+  <li><strong>Rectified flow.</strong> The step $\operatorname{Cov}(R,u_t)=\operatorname{Cov}(R,x_0)$ uses $u_t=x_0-\epsilon$ with $\epsilon\perp x_0$. Other schedules give $u_t=-\dot\alpha_tx_0-\dot\sigma_t\epsilon$, whose covariance with $R$ is $-\dot\alpha_t\operatorname{Cov}(R,x_0)$, the same direction with a $t$-dependent scale.</li>
+  <li><strong>First order.</strong> $G(c)$ is the derivative of the tilted <em>mean</em> at $\tau=0$. It cannot express a reward that wants more or less spread (try "prefer far from origin" in the widget), and for a multimodal $p_{\text{old}}(x_0\mid c)$ a shared translation is a poor proxy for reweighting modes (the $K=8$ toy).</li>
+</ul>
+
+<h4>Limitations the paper acknowledges or implies</h4>
+<ul>
+  <li>The prompt-level direction need not match the statewise posterior guidance (Appendix B). Restoration controls the accumulated mismatch but does not remove it.</li>
+  <li>Results depend on reward quality, as for ReFL and other reward-based fine-tuning (README). No KL to a reference model is used, and no diversity or out-of-distribution metric is reported. Reward hacking is plausible, but untested here.</li>
+  <li>Evaluation largely reuses the training reward models (GenEval, VideoReward), so improvements are measured by the same instrument being optimized.</li>
+</ul>
+
+<h4>Things to watch for</h4>
+<ul>
+  <li><strong>Text versus figure.</strong> In Figure 6(b), <em>NFT: 2 updates</em> collapses to zero a second time near step 440 and stays there through step 800. The text describes only a brief collapse and recovery.</li>
+  <li><strong>Seeds and variance.</strong> No error bars or seed counts are given. The non-monotone pairwise results ($K=4$ below both $K=2$ and $K=8$) are a hint that single-run differences of this size may be noise.</li>
+  <li><strong>Baseline tuning.</strong> On FLUX, NFT's hyperparameters were transferred deliberately to show tuning sensitivity. That is the point being made, but it also means the FLUX comparison is against an untuned NFT.</li>
+  <li><strong>Fixed $\delta$.</strong> $\delta=10^{-5}$ is "fixed throughout", but its meaning in drift units scales with $h$ (the number of steps) and $t$. A 4-step I2V schedule and a 16-step T2V schedule enforce different effective radii.</li>
+</ul>
+
+<h4>What I would test first</h4>
+<ol>
+  <li>Log $\lvert2q-1\rvert$ and $(2q-1)e$ during a real NFT run, using a cheap estimator (for example, re-noise a batch of endpoints and compare $v_\theta$ with the batch-posterior average of $u_t$ at large $t$). Check whether its growth precedes the gradient-norm spike, as it does in the toy.</li>
+  <li>Statewise guidance: compute $G$ separately per time bucket, or per noise level with a small posterior estimate, and compare with the shared $G(c)$. If the single-update deterioration disappears, the Appendix B explanation is confirmed.</li>
+  <li>Diversity under ART: per-prompt endpoint variance, LPIPS diversity or mode coverage, against NFT and Flow-GRPO, since a shared translation per prompt might collapse diversity faster.</li>
+  <li>Three seeds for the pairwise $K$ sweep, and a true pairwise judge rather than binarized scalar scores.</li>
+  <li>A $\delta$ sweep across step counts, to see whether the mask is really a sign test in practice.</li>
+</ol>
+
+<div class="callout warn"><p class="callout-title">Pitfall</p><p>Do not read "removes the consistency force by construction" as "ART's model stays forward–reverse consistent". It does not: the toy's $\lvert e\rvert$ grows to about 5 under ART. The claim is that ART's <em>update</em> contains no term proportional to $e$. Whether the inconsistency matters downstream (for example, if you later switch samplers or step counts) is untested.</p></div>
+
+<h3 id="s4-exercises">Exercises</h3>
+
+<details class="exercise"><summary>Exercise 4.1: Derive the first-order tilt, then the second-order term</summary><div class="solution">
+<p>Let $p_\tau\propto p_{\text{old}}e^{\tau R}$ and $m(\tau)=\mathbb E_{p_\tau}[x_0]$. Show that $m'(0)=\operatorname{Cov}(R,x_0)$, and find $m'(\tau)$ for general $\tau$.</p>
+<p><strong>Solution.</strong> Write $m=M/Z$ with $M=\mathbb E_{\text{old}}[x_0e^{\tau R}]$ and $Z=\mathbb E_{\text{old}}[e^{\tau R}]$. Then $m'=M'/Z-MZ'/Z^2$. Note $M'/Z=\mathbb E_{p_\tau}[x_0R]$, $M/Z=\mathbb E_{p_\tau}[x_0]$ and $Z'/Z=\mathbb E_{p_\tau}[R]$. Hence $m'(\tau)=\operatorname{Cov}_{p_\tau}(R,x_0)$ for <em>every</em> $\tau$, not only at 0, and at $\tau=0$ it is $\operatorname{Cov}_{p_{\text{old}}}(R,x_0)$. Differentiating once more gives $m''(\tau)=\mathbb E_{p_\tau}[(R-\bar R_\tau)^2(x_0-m(\tau))]$, a third mixed central moment. If the reward is roughly symmetric around its mean within $p_{\text{old}}$, this term is small, and the first-order direction stays accurate for larger $\tau$. The worked example confirms this: at $\tau=0.05$ first order is within 0.001 of exact; at $\tau=0.2$ the error is about 0.025.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 4.2: Why the consistency term vanishes for ART, and how to bring it back</summary><div class="solution">
+<p>(a) Compute the on-policy output-space force of the ART loss at a state, conditioned on $s_t$. (b) Suppose someone "simplifies" ART by training on forward-noised states with target $v_{\text{tgt}}=u_t+G(c)$. Compute the conditional on-policy force and identify the consistency term.</p>
+<p><strong>Solution.</strong> (a) The ART target $v^{(0)}_\theta(s_t)+G(c)$ is a deterministic function of $s_t$ and $c$. With $\mathcal L=\tfrac wD\lVert v_\theta-v^{(0)}_\theta-G\rVert^2$, $-\nabla_{v_\theta}\mathcal L|_{v_\theta=v^{(0)}_\theta}=\tfrac{2w}{D}G(c)$. Conditioning on $s_t$ changes nothing, because nothing random remains. No $u_t$ appears, so there is no $\mathbb E[u_t\mid s_t]=v^{\text{old}}_{\text{fwd}}$, and no $e$.<br>(b) Now $-\tfrac{D}{2w}\nabla=\mathbb E[u_t+G-v_{\text{rvs}}^{\text{old}}\mid s_t]=G+\bigl(v^{\text{old}}_{\text{fwd}}-v^{\text{old}}_{\text{rvs}}\bigr)=G+e$. The consistency force returns with weight 1, larger than NFT's $\lvert2q-1\rvert\le1$. The variant also regresses toward $v_{\text{fwd}}$, which is plain flow matching on the model's own samples. The lesson: the force appears exactly when the target's conditional mean involves $\mathbb E[u_t\mid s_t]$.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 4.3: Compute G(c) by hand for K = 4 in 1D, and for K = 2</summary><div class="solution">
+<p>(a) Endpoints $x=(-1,0,1,2)$, rewards $R=(0,1,3,2)$. Compute $\overline{\operatorname{Cov}}$, $G$, the first-order tilted mean at $\tau=0.1$ and the exact tilted mean. (b) Show that for $K=2$ the scalar-reward $G$ equals the pairwise $G$.</p>
+<p><strong>Solution.</strong> (a) $\bar R=1.5$, $\bar x=0.5$. Centered rewards are $(-1.5,-0.5,1.5,0.5)$ and centered endpoints $(-1.5,-0.5,0.5,1.5)$. The products are $2.25,0.25,0.75,0.75$, which sum to 4, so $\overline{\operatorname{Cov}}=1.0$. In 1D, $\operatorname{RMS}(z)=\lvert z\rvert$, so $G=\operatorname{sign}(\overline{\operatorname{Cov}})=+1$: in one dimension, normalization keeps only the sign. First order: $0.5+0.1\cdot1.0=0.6$. Exact: weights $e^{0.1R}=(1,1.10517,1.34986,1.22140)$, sum 4.67643, $\sum w_ix_i=2.79267$, mean $0.59718$.<br>(b) With $K=2$, $\bar R=(R_1+R_2)/2$, so $R_1-\bar R=(R_1-R_2)/2=-(R_2-\bar R)$, and likewise for $x$. Both terms of $\tfrac12\sum_i(R_i-\bar R)(x_i-\bar x)$ equal $\tfrac{R_1-R_2}{2}\cdot\tfrac{x_1-x_2}{2}$, so $\overline{\operatorname{Cov}}=\tfrac12\cdot2\cdot\tfrac{(R_1-R_2)(x_1-x_2)}{4}=\tfrac14(R_1-R_2)(x_1-x_2)$. After RMS normalization this is $\operatorname{sign}(R_1-R_2)\,(x_1-x_2)/\operatorname{RMS}(x_1-x_2)$, the unit-RMS vector from loser to winner, which is the pairwise $G$. Scalar magnitudes are discarded at $K=2$.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 4.4: Branch forces and when the residual dominates</summary><div class="solution">
+<p>(a) Derive $\mathcal F_+=g+qe$ and $\mathcal F_-=g-(1-q)e$ at the on-policy point. (b) At a low-noise state, $q=0.8$, $g$ has norm 0.1 and $e$ has norm 0.5 and is parallel to $g$. Compare the reward-improving and consistency parts of the joint force, and of each branch alone.</p>
+<p><strong>Solution.</strong> (a) Positive branch: $\ell_+=r\lVert\beta d-h\rVert^2$, so $-\tfrac1{2\beta}\nabla_d\ell_+|_{d=0}=r\,h$. Conditioning gives $\mathbb E[rh\mid s_t]=\operatorname{Cov}(r,h)+\mathbb E[r]\mathbb E[h]=g+qe$. Negative branch: $\ell_-=(1-r)\lVert\beta d+h\rVert^2$, so $-\tfrac1{2\beta}\nabla_d\ell_-|_{d=0}=-(1-r)h$, and $\mathbb E[-(1-r)h\mid s_t]=-\operatorname{Cov}(1-r,h)-(1-q)e=g-(1-q)e$.<br>(b) Joint: $2\lVert g\rVert=0.2$ against $(2q-1)\lVert e\rVert=0.6\cdot0.5=0.3$, so the consistency term is 1.5× the guidance at this state. Positive alone: $0.1$ against $0.8\cdot0.5=0.4$ (4×). Negative alone: $0.1$ against $0.2\cdot0.5=0.1$ (equal magnitude, opposite sign along $e$). Joint training helps but does not save this state; only states with $q$ near $1/2$, which are high-noise states, are clean.</p>
+</div></details>
+
+<details class="exercise"><summary>Exercise 4.5: The trust-region mask by hand</summary><div class="solution">
+<p>Take $D=2$, $\nu=0.8$, a 10-step schedule ($h=0.1$), $t=0.5$, $G=(1.1767,0.7845)$. For $d=(0.4,0.1)$, $(1.5,1.0)$ and $(0.01,0)$, compute $m(s_t)$, decide whether the state is masked, and find the drift RMS at which $m=\delta=10^{-5}$.</p>
+<p><strong>Solution.</strong> $\sigma^2_{\text{ref}}=\nu^2\tfrac{t}{1-t}h=0.064$, and $\Delta\mu=h(1+\nu^2/2)d=0.132\,d$, so $m=0.132^2\lVert d\rVert^2/(2\cdot2\cdot0.064)=0.06806\lVert d\rVert^2$.</p>
+<ul>
+  <li>$d=(0.4,0.1)$: $\lVert d\rVert^2=0.17$, so $m=0.01157\ge\delta$. $\langle d,G-d\rangle=0.4\cdot0.7767+0.1\cdot0.6845=0.379&gt;0$. Masked.</li>
+  <li>$d=(1.5,1.0)$: $m=0.2212\ge\delta$, but $\langle d,G-d\rangle=1.5\cdot(-0.3233)+1.0\cdot(-0.2155)=-0.700&lt;0$. Kept, $w=0.5$.</li>
+  <li>$d=(0.01,0)$: $m=6.8\times10^{-6}&lt;\delta$. Kept.</li>
+</ul>
+<p>Threshold: $m=0.06806\cdot D\cdot\operatorname{RMS}(d)^2=0.1361\operatorname{RMS}(d)^2=10^{-5}$ gives $\operatorname{RMS}(d)\approx0.0086$. In general, $m=\tfrac{h(1+\nu^2/2)^2(1-t)}{2\nu^2t}\operatorname{RMS}(d)^2$. With more steps (smaller $h$) or larger $t$, the same $\delta$ tolerates more drift.</p>
+</div></details>
+
+<div class="takeaways"><p class="callout-title">Takeaways</p><ul>
+  <li>NFT's on-policy force is $2g+(2q-1)e$: reward-improving guidance plus a consistency force from the gap between the sampler's velocity and the ideal forward velocity of its own samples. Joint training cancels it across samples, not per state, and $\lvert2q-1\rvert$ grows as noise falls.</li>
+  <li>NFT's loss is guidance plus $\beta^2\lVert v_\theta-v_{\text{old}}\rVert^2$. On-policy, the restoration term is zero; EMA keeps it alive, and that, not off-policy data, is what stabilizes NFT.</li>
+  <li>DiffusionART aggregates first: $G(c)=\overline{\operatorname{Cov}}(R,x_0\mid c)/\operatorname{RMS}$, the normalized first-order reward tilt of the endpoint mean. It adds $G(c)$ to the cached velocity of every visited state. The target never uses $u_t$, so the consistency force is absent by construction.</li>
+  <li>A second disjoint-minibatch update adds restoration $-d$ proportional to each state's drift, with no EMA schedule. A KL-proxy trust-region mask drops only large <em>outward</em> moves.</li>
+  <li>Pairwise labels plug into the same covariance. At $K=2$, $G$ points from loser to winner and equals the scalar-reward $G$.</li>
+  <li>The large-scale evidence is strong on efficiency: 12.02× and 11.72× fewer GPU hours on T2V (1:1), and 4.8× on I2V. The mechanistic claims are supported by targeted ablations but not by direct measurement of the consistency force. In a multimodal 2D toy, a shared prompt-level direction is a weak instrument at larger $K$.</li>
+</ul></div>
+
+<div class="reading"><p class="callout-title">Further reading</p><ul>
+  <li>The paper: Wan et al., "DiffusionART: Efficient, Stable and Scalable Reinforcement of Diffusion Models", <a href="https://arxiv.org/abs/2610.12572">arXiv:2610.12572</a>; code at <a href="https://github.com/vanzll/DiffusionART">github.com/vanzll/DiffusionART</a>.</li>
+  <li>DiffusionNFT, the forward-process baseline whose objective §3 dissects: <a href="https://arxiv.org/abs/2509.16117">arXiv:2509.16117</a>.</li>
+  <li>Flow-GRPO, source of the ODE-to-SDE reference transitions used by the mask: <a href="https://arxiv.org/abs/2505.05470">arXiv:2505.05470</a>.</li>
+  <li>Flow-DPPO, which inspired the outward-only masking rule: <a href="https://arxiv.org/abs/2606.11025">arXiv:2606.11025</a>.</li>
+  <li>Tilt Matching, on exponential tilting of flow models toward rewards: <a href="https://arxiv.org/abs/2512.21829">arXiv:2512.21829</a>; Centered Reward Distillation: <a href="https://arxiv.org/abs/2603.14128">arXiv:2603.14128</a>.</li>
+  <li>PPO, for the clipping analogy: <a href="https://arxiv.org/abs/1707.06347">arXiv:1707.06347</a>.</li>
+</ul></div>
+</section>

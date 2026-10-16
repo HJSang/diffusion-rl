@@ -1,0 +1,104 @@
+<section class="intro" id="overview">
+  <p class="eyebrow">A study guide for arXiv 2610.12572</p>
+  <h1>Learning diffusion RL through DiffusionART</h1>
+  <p class="lede">Five steps that take you from "I know GRPO for language models" to reading every equation in <em>DiffusionART: Efficient, Stable and Scalable Reinforcement of Diffusion Models</em> and running its code.</p>
+
+  <p>This guide is written for someone who already trains language models with RL. You know what an advantage is, why PPO clips a ratio, and how a rollout engine feeds a trainer. Most of that carries over to image and video generators. What changes is the generator itself, which builds a sample by integrating a velocity field instead of emitting tokens, and that one change reshapes which RL tricks are available. The guide spends its time on exactly those differences.</p>
+
+  <p>Each step is a chapter with the motivation, the mechanism, the math you need (derived, not just stated), a main code block, a worked example with numbers, pitfalls and exercises with solutions. Toy code runs on a laptop CPU in seconds. Interactive figures let you move the knobs that the paper turns.</p>
+
+  <h3 id="s0-path">The path</h3>
+  <div class="roadmap">
+    <a href="#step-1"><span class="n">1</span><h3>Flow matching and sampling</h3><span class="time">about 1 day</span><p>How a rectified-flow model turns noise into an image, why ODE and SDE samplers differ, and what classifier-free guidance does.</p></a>
+    <a href="#step-2"><span class="n">2</span><h3>From LLM RL to diffusion RL</h3><span class="time">half a day</span><p>Denoising as an MDP, the log-probability of a sampler step, rewards for images and videos, and the credit-assignment problem.</p></a>
+    <a href="#step-3"><span class="n">3</span><h3>The baselines</h3><span class="time">1–2 days</span><p>DDPO, Flow-GRPO, DiffusionNFT, ReFL and Diffusion-DPO: what each optimizes, how, and where it breaks.</p></a>
+    <a href="#step-4"><span class="n">4</span><h3>The DiffusionART paper</h3><span class="time">1 day</span><p>The diagnosis of NFT's hidden consistency force, covariance guidance, two-update restoration, trust-region masking and the experiments.</p></a>
+    <a href="#step-5"><span class="n">5</span><h3>Reading and running the code</h3><span class="time">1 day</span><p>A tour of the repository, the core functions line by line, the config system, the CPU smoke run and experiments to try.</p></a>
+  </div>
+
+  <h3 id="s0-story">The whole story in one figure</h3>
+  <p>Every chapter fills in one box of this chain. If you lose track of why a topic matters, come back here.</p>
+  <figure class="diagram">
+    <svg viewBox="0 0 760 330" role="img" aria-label="Concept chain from flow matching to DiffusionART">
+      <defs>
+        <marker id="s0-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"></path>
+        </marker>
+      </defs>
+      <g style="font-family:var(--font-body);font-size:13px">
+        <rect x="10" y="20" width="220" height="74" rx="8" style="fill:var(--surface);stroke:var(--line)"></rect>
+        <text x="24" y="44" style="fill:var(--muted);font-size:11px;letter-spacing:.06em">STEP 1</text>
+        <text x="24" y="64" style="fill:var(--fg);font-weight:600">Generator = velocity field</text>
+        <text x="24" y="82" style="fill:var(--muted)">ODE: deterministic, no log-prob</text>
+
+        <rect x="270" y="20" width="220" height="74" rx="8" style="fill:var(--surface);stroke:var(--line)"></rect>
+        <text x="284" y="44" style="fill:var(--muted);font-size:11px;letter-spacing:.06em">STEP 2</text>
+        <text x="284" y="64" style="fill:var(--fg);font-weight:600">Denoising MDP</text>
+        <text x="284" y="82" style="fill:var(--muted)">one reward, many steps</text>
+
+        <rect x="530" y="20" width="220" height="74" rx="8" style="fill:var(--surface);stroke:var(--line)"></rect>
+        <text x="544" y="44" style="fill:var(--muted);font-size:11px;letter-spacing:.06em">STEP 3</text>
+        <text x="544" y="64" style="fill:var(--fg);font-weight:600">Two families of RL</text>
+        <text x="544" y="82" style="fill:var(--muted)">reverse vs forward process</text>
+
+        <line x1="230" y1="57" x2="266" y2="57" style="stroke:var(--muted)" marker-end="url(#s0-arr)"></line>
+        <line x1="490" y1="57" x2="526" y2="57" style="stroke:var(--muted)" marker-end="url(#s0-arr)"></line>
+
+        <rect x="400" y="132" width="350" height="64" rx="8" style="fill:var(--surface);stroke:var(--line)"></rect>
+        <text x="414" y="156" style="fill:var(--fg);font-weight:600">Flow-GRPO (reverse process)</text>
+        <text x="414" y="178" style="fill:var(--muted)">needs SDE likelihoods · weak credit assignment</text>
+        <rect x="10" y="132" width="350" height="64" rx="8" style="fill:var(--surface);stroke:var(--line)"></rect>
+        <text x="24" y="156" style="fill:var(--fg);font-weight:600">DiffusionNFT (forward process)</text>
+        <text x="24" y="178" style="fill:var(--muted)">efficient · unstable without tuned EMA</text>
+        <line x1="640" y1="94" x2="600" y2="128" style="stroke:var(--muted)" marker-end="url(#s0-arr)"></line>
+        <line x1="600" y1="94" x2="200" y2="128" style="stroke:var(--muted)" marker-end="url(#s0-arr)"></line>
+
+        <rect x="10" y="232" width="350" height="84" rx="8" style="fill:var(--tint-accent);stroke:var(--accent)"></rect>
+        <text x="24" y="256" style="fill:var(--accent);font-size:11px;letter-spacing:.06em">STEP 4 · DIAGNOSIS</text>
+        <text x="24" y="276" style="fill:var(--fg);font-weight:600">Hidden consistency force in NFT</text>
+        <text x="24" y="296" style="fill:var(--muted)">EMA helps by restoration, not off-policy data</text>
+        <rect x="400" y="232" width="350" height="84" rx="8" style="fill:var(--tint-accent-2);stroke:var(--accent-2)"></rect>
+        <text x="414" y="256" style="fill:var(--accent-2);font-size:11px;letter-spacing:.06em">STEPS 4–5 · DIFFUSIONART</text>
+        <text x="414" y="276" style="fill:var(--fg);font-weight:600">Target = cached velocity + G(c)</text>
+        <text x="414" y="296" style="fill:var(--muted)">G(c) ∝ Cov(R, x₀) · 2 disjoint updates + mask</text>
+        <line x1="185" y1="196" x2="185" y2="228" style="stroke:var(--muted)" marker-end="url(#s0-arr)"></line>
+        <line x1="360" y1="274" x2="396" y2="274" style="stroke:var(--muted)" marker-end="url(#s0-arr)"></line>
+        <line x1="575" y1="196" x2="575" y2="228" style="stroke:var(--muted)" marker-end="url(#s0-arr)"></line>
+      </g>
+    </svg>
+    <figcaption>DiffusionART keeps the cheap, likelihood-free velocity regression of forward-process RL, applies it to the states the ODE sampler actually visited (as reverse-process RL does), and replaces both NFT's per-sample targets and its EMA with a shared per-prompt direction and a drift-adaptive second update.</figcaption>
+  </figure>
+
+  <h3 id="s0-claims">What the paper claims</h3>
+  <ul>
+    <li>NFT-style objectives contain a hidden <strong>forward–reverse consistency force</strong> that pushes velocities in a direction unrelated to reward. Training the positive and negative branches jointly cancels it only partly.</li>
+    <li>EMA rollout policies stabilize NFT through a <strong>restoration force</strong> toward the lagged model, not because the rollouts are off-policy. The EMA schedule must be tuned per task.</li>
+    <li>DiffusionART removes the consistency force by construction and replaces EMA with a second, trust-region-masked update. It needs no differentiable reward, works with few samples per prompt, and supports pairwise reward models.</li>
+    <li>On HunyuanVideo-13B with equally weighted visual and motion quality rewards, it reaches the late-stage mean reward of DiffusionNFT and Flow-GRPO-Fast with 12.02× and 11.72× fewer GPU hours, and ends with 28.8% and 53.0% higher mean training reward.</li>
+  </ul>
+
+  <h3 id="s0-notation">Notation used throughout</h3>
+  <p>All chapters follow the paper's conventions. Diffusers and some repo code use the opposite sign for velocity; the chapters flag every place where that happens.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Symbol</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>$t\in[0,1]$</td><td>Noise level. $t=1$ is pure noise, $t=0$ is a clean sample. Generation runs from 1 to 0.</td></tr>
+      <tr><td>$x_t=\alpha_t x_0+\sigma_t\epsilon$</td><td>Forward (noised) state. Rectified flow uses $\alpha_t=1-t$, $\sigma_t=t$, and $\epsilon\sim\mathcal N(0,I)$.</td></tr>
+      <tr><td>$u_t=x_0-\epsilon$</td><td>Per-sample velocity target, pointing in the denoising direction.</td></tr>
+      <tr><td>$v_\theta(x_t,t,c)$</td><td>Model velocity for prompt (condition) $c$. One Euler step: $x_{t-\Delta}=x_t+\Delta\,v_\theta$.</td></tr>
+      <tr><td>$x_0^{(i)}$, $K$</td><td>The $i$-th generated clean sample (an <em>endpoint</em>), and the number of samples per prompt.</td></tr>
+      <tr><td>$R_i$, $\bar R_c$</td><td>Raw reward of endpoint $i$ and the prompt's mean reward.</td></tr>
+      <tr><td>$\theta_{\text{old}}$, $v_{\text{old}}$</td><td>Rollout policy (frozen during an iteration) and its velocity. In DiffusionART also written $v_\theta^{(0)}$.</td></tr>
+      <tr><td>$s_t$</td><td>A reverse-process state visited by the ODE sampler: $(c, t, x_t)$.</td></tr>
+      <tr><td>$G(c)$</td><td>DiffusionART's per-prompt guidance: the RMS-normalized covariance of reward and endpoint.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3 id="s0-use">How to use this guide</h3>
+  <ul>
+    <li>Read the steps in order the first time. Step 4 relies on the ideal-velocity idea from Step 1 and on NFT's MSE form from Step 3.</li>
+    <li>Run every toy example. Each one is self-contained PyTorch and prints the numbers quoted next to it.</li>
+    <li>Try each exercise before opening its solution. The derivations in Steps 3 and 4 are short, and doing them once makes the paper read quickly.</li>
+    <li>Keep the paper PDF and the repository open side by side. Equation and section numbers in this guide refer to the paper; file paths refer to the <code>DiffusionART</code> repository.</li>
+  </ul>
+</section>

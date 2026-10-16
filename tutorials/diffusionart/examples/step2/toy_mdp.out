@@ -1,0 +1,16 @@
+rewards    [-1.84 -1.65 -2.45 -2.05  1.78 -1.83  2.    2.29]
+advantages [ 0.46  1.01 -1.32 -0.15  0.37 -1.49  0.48  0.63]
+old logp of traj 0, per step: [-1.81 -4.65 -2.7  -2.99 -0.29 -1.53  0.79  0.54  2.26  1.38]
+replay ratio before update (should be 1): 1.0
+|mean gradient| = 0.782, mean |per-transition gradient| = 3.474
+per-step SNR |mean_i g_ik| / std_i: [0.22, 0.19, 0.29, 0.41, 0.33, 0.23, 0.32, 0.43, 0.34, 0.39]
+step 0 t=1.0 std=0.800 ratio min/max = 0.9999/1.0002
+step 1 t=0.9 std=0.759 ratio min/max = 0.9996/1.0004
+step 2 t=0.8 std=0.506 ratio min/max = 0.9988/1.0013
+step 3 t=0.7 std=0.386 ratio min/max = 0.9983/1.0026
+step 4 t=0.6 std=0.310 ratio min/max = 0.9975/1.0010
+step 5 t=0.5 std=0.253 ratio min/max = 0.9969/1.0018
+step 6 t=0.4 std=0.207 ratio min/max = 0.9964/1.0022
+step 7 t=0.3 std=0.166 ratio min/max = 0.9973/1.0025
+step 8 t=0.2 std=0.126 ratio min/max = 0.9927/1.0053
+step 9 t=0.1 std=0.084 ratio min/max = 0.9935/1.0064

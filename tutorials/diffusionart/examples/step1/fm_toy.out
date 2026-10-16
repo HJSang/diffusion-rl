@@ -1,0 +1,16 @@
+iter     0  flow-matching loss 7.821
+iter  2000  flow-matching loss 3.947
+iter  4000  flow-matching loss 3.816
+iter  6000  flow-matching loss 3.415
+loss of ideal v*   3.892   (irreducible floor)
+loss of learned v  3.897
+E||v_theta - v*||^2 0.0055
+data                   mode frac [0.499 0.301 0.2  ]  within-mode std [0.349 0.351 0.352]
+ODE learned,  1 steps  mode frac [1. 0. 0.]  within-mode std [0.445 1.528   nan]
+ODE learned,  2 steps  mode frac [0.662 0.232 0.106]  within-mode std [0.516 0.838 0.764]
+ODE learned,  8 steps  mode frac [0.515 0.297 0.188]  within-mode std [0.363 0.417 0.438]
+ODE learned, 50 steps  mode frac [0.502 0.3   0.198]  within-mode std [0.357 0.366 0.381]
+ODE ideal v*, 50 steps mode frac [0.49  0.3   0.209]  within-mode std [0.343 0.345 0.351]
+SDE learned nu=0.7, 50 mode frac [0.5   0.303 0.197]  within-mode std [0.361 0.366 0.38 ]  mean traj log-prob 85.5
+SDE learned nu=0.7, 10 mode frac [0.501 0.297 0.202]  within-mode std [0.374 0.394 0.426]  mean traj log-prob -0.5
+one-step Euler from t=1 lands at [-0.4 -0.8]  data mean [-0.4 -0.8]

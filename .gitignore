@@ -1,0 +1,14 @@
+# Python environments and caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+# Run outputs from the tutorial examples
+tutorials/diffusionart/examples/step5/runs/
+tutorials/diffusionart/examples/step5/out/
+tutorials/diffusionart/examples/step5/cpu-smoke-run1/
+tutorials/diffusionart/examples/**/preview.html
+tutorials/diffusionart/examples/step5/*.log
+# arXiv source tarballs (unpacked copies live next to them)
+*.src
+.DS_Store

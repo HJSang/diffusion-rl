@@ -1,0 +1,55 @@
+K=8, 128 trajectories x 10 ODE steps per iteration, Adam lr=0.001
+ART 2 upd    it=  0 R=     -7.6 hit=0.11 maxgrad=       0 |2g|=0.934 |(2q-1)e|=0.172 |e|=0.240 |2q-1|: t>=.7 0.18, t<=.4 0.75
+ART 2 upd    it= 50 R=     -6.1 hit=0.00 maxgrad=    2.85 |2g|=0.811 |(2q-1)e|=1.033 |e|=2.232 |2q-1|: t>=.7 0.24, t<=.4 0.61
+ART 2 upd    it=100 R=     -5.1 hit=0.00 maxgrad=    7.02 |2g|=0.250 |(2q-1)e|=0.481 |e|=3.958 |2q-1|: t>=.7 0.07, t<=.4 0.21
+ART 2 upd    it=150 R=    -2.49 hit=0.12 maxgrad=    6.36 |2g|=0.493 |(2q-1)e|=0.980 |e|=4.060 |2q-1|: t>=.7 0.07, t<=.4 0.52
+ART 2 upd    it=200 R=    -2.52 hit=0.50 maxgrad=    5.71 |2g|=0.192 |(2q-1)e|=0.568 |e|=4.500 |2q-1|: t>=.7 0.11, t<=.4 0.22
+ART 2 upd    it=250 R=     -1.7 hit=0.62 maxgrad=    5.71 |2g|=0.325 |(2q-1)e|=0.580 |e|=4.535 |2q-1|: t>=.7 0.02, t<=.4 0.35
+ART 2 upd    it=300 R=    -1.68 hit=0.62 maxgrad=    5.73 |2g|=0.340 |(2q-1)e|=0.941 |e|=5.298 |2q-1|: t>=.7 0.10, t<=.4 0.39
+ART 2 upd    it=350 R=    -1.73 hit=0.62 maxgrad=     6.1 |2g|=0.307 |(2q-1)e|=1.015 |e|=5.841 |2q-1|: t>=.7 0.14, t<=.4 0.34
+ART 2 upd    it=400 R=     -1.4 hit=0.62 maxgrad=    7.22 |2g|=0.195 |(2q-1)e|=0.496 |e|=5.724 |2q-1|: t>=.7 0.06, t<=.4 0.18
+ART 1 upd    it=  0 R=     -7.6 hit=0.11 maxgrad=       0 |2g|=0.934 |(2q-1)e|=0.172 |e|=0.240 |2q-1|: t>=.7 0.18, t<=.4 0.75
+ART 1 upd    it= 50 R=      -10 hit=0.00 maxgrad=    1.04 |2g|=1.240 |(2q-1)e|=0.686 |e|=1.216 |2q-1|: t>=.7 0.26, t<=.4 0.80
+ART 1 upd    it=100 R=    -54.4 hit=0.00 maxgrad=    11.5 |2g|=0.725 |(2q-1)e|=1.596 |e|=4.234 |2q-1|: t>=.7 0.16, t<=.4 0.61
+ART 1 upd    it=150 R=    -28.2 hit=0.00 maxgrad=    9.83 |2g|=0.652 |(2q-1)e|=1.231 |e|=4.739 |2q-1|: t>=.7 0.16, t<=.4 0.40
+ART 1 upd    it=200 R=      -11 hit=0.00 maxgrad=    8.53 |2g|=0.842 |(2q-1)e|=1.634 |e|=4.372 |2q-1|: t>=.7 0.17, t<=.4 0.60
+ART 1 upd    it=250 R=    -3.91 hit=0.37 maxgrad=    5.64 |2g|=0.264 |(2q-1)e|=0.670 |e|=3.779 |2q-1|: t>=.7 0.13, t<=.4 0.24
+ART 1 upd    it=300 R=    -1.14 hit=0.50 maxgrad=    4.22 |2g|=0.109 |(2q-1)e|=0.202 |e|=4.562 |2q-1|: t>=.7 0.03, t<=.4 0.08
+ART 1 upd    it=350 R=   -0.715 hit=0.75 maxgrad=    4.27 |2g|=0.258 |(2q-1)e|=0.932 |e|=4.998 |2q-1|: t>=.7 0.17, t<=.4 0.30
+ART 1 upd    it=400 R=   -0.519 hit=0.75 maxgrad=    3.14 |2g|=0.036 |(2q-1)e|=0.440 |e|=6.026 |2q-1|: t>=.7 0.07, t<=.4 0.08
+NFT on-pol   it=  0 R=     -7.6 hit=0.11 maxgrad=       0 |2g|=0.934 |(2q-1)e|=0.172 |e|=0.240 |2q-1|: t>=.7 0.18, t<=.4 0.75
+NFT on-pol   it= 50 R=    -5.02 hit=0.07 maxgrad=    1.12 |2g|=0.783 |(2q-1)e|=0.298 |e|=0.573 |2q-1|: t>=.7 0.19, t<=.4 0.71
+NFT on-pol   it=100 R=   -0.419 hit=0.71 maxgrad=    2.06 |2g|=0.361 |(2q-1)e|=0.394 |e|=1.611 |2q-1|: t>=.7 0.18, t<=.4 0.43
+NFT on-pol   it=150 R=  -0.0988 hit=0.95 maxgrad=     2.2 |2g|=0.084 |(2q-1)e|=0.089 |e|=0.614 |2q-1|: t>=.7 0.10, t<=.4 0.13
+NFT on-pol   it=200 R=  -0.0247 hit=0.99 maxgrad=    1.38 |2g|=0.076 |(2q-1)e|=0.070 |e|=0.566 |2q-1|: t>=.7 0.10, t<=.4 0.12
+NFT on-pol   it=250 R=   -0.018 hit=0.99 maxgrad=    1.05 |2g|=0.039 |(2q-1)e|=0.032 |e|=0.427 |2q-1|: t>=.7 0.07, t<=.4 0.08
+NFT on-pol   it=300 R=  -0.0097 hit=1.00 maxgrad=    1.06 |2g|=0.035 |(2q-1)e|=0.031 |e|=0.408 |2q-1|: t>=.7 0.06, t<=.4 0.06
+NFT on-pol   it=350 R= -0.00946 hit=1.00 maxgrad=     1.1 |2g|=0.034 |(2q-1)e|=0.043 |e|=0.357 |2q-1|: t>=.7 0.05, t<=.4 0.06
+NFT on-pol   it=400 R=  -0.0071 hit=1.00 maxgrad=   0.802 |2g|=0.016 |(2q-1)e|=0.018 |e|=0.362 |2q-1|: t>=.7 0.04, t<=.4 0.04
+NFT 2 upd    it=  0 R=     -7.6 hit=0.11 maxgrad=       0 |2g|=0.934 |(2q-1)e|=0.172 |e|=0.240 |2q-1|: t>=.7 0.18, t<=.4 0.75
+NFT 2 upd    it= 50 R=   -0.619 hit=0.65 maxgrad=    2.02 |2g|=0.319 |(2q-1)e|=0.264 |e|=1.348 |2q-1|: t>=.7 0.13, t<=.4 0.39
+NFT 2 upd    it=100 R=   -0.057 hit=0.96 maxgrad=    1.93 |2g|=0.122 |(2q-1)e|=0.091 |e|=0.488 |2q-1|: t>=.7 0.13, t<=.4 0.18
+NFT 2 upd    it=150 R=   -0.013 hit=0.99 maxgrad=     1.3 |2g|=0.032 |(2q-1)e|=0.035 |e|=0.485 |2q-1|: t>=.7 0.07, t<=.4 0.07
+NFT 2 upd    it=200 R= -0.00688 hit=1.00 maxgrad=    1.07 |2g|=0.027 |(2q-1)e|=0.033 |e|=0.326 |2q-1|: t>=.7 0.06, t<=.4 0.07
+NFT 2 upd    it=250 R= -0.00624 hit=1.00 maxgrad=   0.809 |2g|=0.023 |(2q-1)e|=0.014 |e|=0.256 |2q-1|: t>=.7 0.06, t<=.4 0.06
+NFT 2 upd    it=300 R= -0.00361 hit=1.00 maxgrad=    1.22 |2g|=0.011 |(2q-1)e|=0.018 |e|=0.290 |2q-1|: t>=.7 0.06, t<=.4 0.06
+NFT 2 upd    it=350 R= -0.00441 hit=1.00 maxgrad=    1.66 |2g|=0.008 |(2q-1)e|=0.009 |e|=0.266 |2q-1|: t>=.7 0.04, t<=.4 0.04
+NFT 2 upd    it=400 R= -0.00331 hit=1.00 maxgrad=   0.818 |2g|=0.007 |(2q-1)e|=0.011 |e|=0.276 |2q-1|: t>=.7 0.04, t<=.4 0.04
+NFT pos-only it=  0 R=     -7.6 hit=0.11 maxgrad=       0
+NFT pos-only it= 50 R=    -4.37 hit=0.00 maxgrad=   0.906
+NFT pos-only it=100 R=    -3.44 hit=0.00 maxgrad=   0.428
+NFT pos-only it=150 R=    -2.48 hit=0.00 maxgrad=   0.439
+NFT pos-only it=200 R=    -1.54 hit=0.00 maxgrad=   0.305
+NFT pos-only it=250 R=   -0.257 hit=0.49 maxgrad=   0.657
+NFT pos-only it=300 R=  -0.0119 hit=1.00 maxgrad=   0.672
+NFT pos-only it=350 R= -0.00542 hit=1.00 maxgrad=    0.53
+NFT pos-only it=400 R= -0.00269 hit=1.00 maxgrad=   0.504
+NFT neg-only it=  0 R=     -7.6 hit=0.11 maxgrad=       0
+NFT neg-only it= 50 R=-3.45e+03 hit=0.00 maxgrad=5.35e+04
+NFT neg-only it=100 R=-3.14e+18 hit=0.00 maxgrad=     inf
+NFT neg-only it=150 R=-1.04e+20 hit=0.00 maxgrad=     inf
+NFT neg-only it=200 R=-9.88e+19 hit=0.00 maxgrad=     inf
+NFT neg-only it=250 R=-1.05e+20 hit=0.00 maxgrad=     inf
+NFT neg-only it=300 R= -1.1e+20 hit=0.00 maxgrad=     inf
+NFT neg-only it=350 R=-1.04e+20 hit=0.00 maxgrad=     inf
+NFT neg-only it=400 R=-1.02e+20 hit=0.00 maxgrad=     inf

@@ -1,0 +1,1477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Step 5: Reading and running the code</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600&family=Literata:opsz,wght@7..72,500;7..72,650&display=swap">
+<style>
+/* Layout: sticky contents rail on the left, one reading column (~68ch) on the right;
+   the rail folds above the content under 980px. Teal = insight / reward direction,
+   vermilion = the method, both taken from the paper's own figure colors. */
+:root {
+  --bg: #f5f7f6;
+  --surface: #ffffff;
+  --fg: #172120;
+  --muted: #566664;
+  --line: #d6dedc;
+  --accent: #007f88;
+  --accent-2: #c2500c;
+  --good: #2c7a4b;
+  --bad: #b3261e;
+  --code-bg: #edf2f1;
+  --code-fg: #1d2a28;
+  --tint-accent: #e3f1f1;
+  --tint-accent-2: #f9ebe1;
+  --tint-warn: #fbefe0;
+  --font-display: "Literata", "Iowan Old Style", Georgia, serif;
+  --font-body: "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --measure: 70ch;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1514; --surface: #151d1c; --fg: #e1e9e7; --muted: #92a3a0; --line: #2a3634;
+    --accent: #45c2ca; --accent-2: #f08c4e; --good: #63c58d; --bad: #f2867d;
+    --code-bg: #111918; --code-fg: #d8e2e0;
+    --tint-accent: #13292a; --tint-accent-2: #2c1d13; --tint-warn: #2b2214;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1514; --surface: #151d1c; --fg: #e1e9e7; --muted: #92a3a0; --line: #2a3634;
+  --accent: #45c2ca; --accent-2: #f08c4e; --good: #63c58d; --bad: #f2867d;
+  --code-bg: #111918; --code-fg: #d8e2e0;
+  --tint-accent: #13292a; --tint-accent-2: #2c1d13; --tint-warn: #2b2214;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 16px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.68 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px;
+}
+
+.shell {
+  display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 48px;
+  max-width: 1240px; margin: 0 auto; padding-inline: 24px;
+}
+@media (max-width: 980px) {
+  .shell { grid-template-columns: minmax(0, 1fr); gap: 0; padding-inline: 16px; }
+}
+
+/* Contents rail */
+.toc {
+  position: sticky; top: env(safe-area-inset-top, 0px); align-self: start;
+  max-height: 100vh; overflow-y: auto; padding-block: 32px 24px; font-size: 14px;
+}
+.toc-brand { font: 650 20px/1.2 var(--font-display); margin: 0 0 20px; }
+.toc-brand span { font: 400 13px var(--font-body); color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.toc ol { list-style: none; margin: 0; padding: 0; }
+.toc-list { display: grid; gap: 4px; }
+.toc-step > a { display: flex; gap: 10px; align-items: baseline; color: var(--fg); text-decoration: none; font-weight: 500; padding: 4px 0; }
+.toc-step .num {
+  font: 600 12px var(--font-mono); color: var(--accent-2); min-width: 14px;
+}
+.toc-step ol { margin: 2px 0 8px 24px; border-left: 1px solid var(--line); }
+.toc-step ol a { display: block; padding: 3px 0 3px 12px; color: var(--muted); text-decoration: none; line-height: 1.4; }
+.toc a:hover { color: var(--accent); }
+.toc a.active { color: var(--accent); }
+.toc-step ol a.active { border-left: 2px solid var(--accent); margin-left: -1px; padding-left: 11px; }
+.toc-step.current > a { color: var(--accent-2); }
+.toc-alt { color: var(--muted); font-size: 13px; margin-top: 20px; line-height: 1.6; }
+@media (max-width: 980px) {
+  .toc { position: static; max-height: none; border-bottom: 1px solid var(--line); padding-block: 24px 16px; }
+  .toc-step ol { display: none; }
+}
+
+/* Reading column */
+.content { min-width: 0; padding-block: 40px 96px; }
+.content > section, .content > .pager { max-width: var(--measure); }
+section.step, section.intro, section.closing { padding-block: 24px 40px; }
+section.step + section.step, section.step + section.closing { border-top: 1px solid var(--line); margin-top: 48px; padding-top: 56px; }
+
+h1, h2, h3, h4 { font-family: var(--font-display); font-weight: 650; text-wrap: balance; line-height: 1.22; }
+h1 { font-size: clamp(32px, 5vw, 46px); margin: 0 0 16px; letter-spacing: -.01em; }
+h2 { font-size: clamp(27px, 3.6vw, 36px); margin: 4px 0 12px; letter-spacing: -.005em; }
+h3 { font-size: 23px; margin: 48px 0 12px; }
+h4 { font-size: 18px; margin: 32px 0 8px; }
+p, ul, ol { margin: 0 0 16px; }
+li + li { margin-top: 4px; }
+.eyebrow { font: 600 12.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent-2); margin: 0; }
+.lede { font-size: 19px; line-height: 1.55; color: var(--muted); }
+.step-head { margin-bottom: 28px; }
+strong { font-weight: 600; }
+
+code { font: 0.88em/1.5 var(--font-mono); background: var(--code-bg); color: var(--code-fg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+pre { margin: 0; overflow-x: auto; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+pre code { background: none; padding: 0; font-size: 13.5px; line-height: 1.6; overflow-wrap: normal; white-space: pre; display: block; }
+pre code.language-text { color: var(--muted); }
+
+/* Figures */
+figure { margin: 28px 0; min-width: 0; }
+figcaption { font-size: 14px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+figure.code figcaption { margin: 0 0 8px; }
+figure.code pre + pre, figure.code .pre-wrap + pre { margin-top: 8px; }
+.pre-wrap { position: relative; }
+.tag {
+  display: inline-block; font: 600 11.5px/1.4 var(--font-mono); color: var(--accent-2);
+  background: var(--tint-accent-2); border-radius: 4px; padding: 2px 7px; margin-right: 6px; overflow-wrap: anywhere;
+}
+button.copy {
+  position: absolute; top: 8px; right: 8px; font: 500 12px var(--font-body); color: var(--muted);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 3px 9px; cursor: pointer; opacity: .85;
+}
+button.copy:hover { color: var(--accent); opacity: 1; }
+figure.diagram { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; }
+figure.diagram > svg { display: block; width: 100%; min-width: 560px; height: auto; }
+figure.widget { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+figure.widget canvas { display: block; width: 100%; max-width: 100%; border-radius: 6px; background: var(--bg); }
+.widget-controls { display: flex; flex-wrap: wrap; gap: 10px 20px; align-items: center; margin-top: 12px; font-size: 14px; }
+.widget-controls label { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); }
+.widget-controls input[type="range"] { accent-color: var(--accent); width: 140px; max-width: 40vw; }
+.widget-controls button, .widget-controls select {
+  font: 500 13.5px var(--font-body); color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 12px; cursor: pointer;
+}
+.widget-controls button:hover { border-color: var(--accent); color: var(--accent); }
+.widget-controls output, .widget-readout { font: 13px var(--font-mono); color: var(--fg); font-variant-numeric: tabular-nums; }
+
+.math-block { overflow-x: auto; overflow-y: hidden; margin: 18px 0; padding: 4px 0; }
+mjx-container[display="true"] { margin: 0.6em 0 !important; }
+
+.table-wrap { overflow-x: auto; margin: 24px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; background: var(--bg); font-size: 13.5px; }
+tr:last-child td { border-bottom: 0; }
+
+/* Callouts */
+.callout, .takeaways, .reading { border-radius: 8px; padding: 14px 18px; margin: 24px 0; }
+.callout > :last-child, .takeaways > :last-child, .reading > :last-child { margin-bottom: 0; }
+.callout-title { font: 600 12.5px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; margin: 0 0 6px; }
+.callout.insight { background: var(--tint-accent); }
+.callout.insight .callout-title { color: var(--accent); }
+.callout.llm { background: var(--surface); border: 1px dashed var(--accent-2); }
+.callout.llm .callout-title { color: var(--accent-2); }
+.callout.warn { background: var(--tint-warn); }
+.callout.warn .callout-title { color: var(--bad); }
+.takeaways { border: 1px solid var(--accent); background: var(--surface); }
+.takeaways .callout-title { color: var(--accent); }
+.reading { border: 1px solid var(--line); background: var(--surface); }
+.reading .callout-title { color: var(--muted); }
+
+/* Exercises */
+details.exercise { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); margin: 12px 0; }
+details.exercise > summary { cursor: pointer; padding: 12px 16px; font-weight: 500; list-style-position: outside; margin-left: 18px; }
+details.exercise[open] > summary { border-bottom: 1px solid var(--line); }
+details.exercise .solution { padding: 14px 18px 4px; }
+details.exercise .solution::before { content: "Solution"; display: block; font: 600 12px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--good); margin-bottom: 6px; }
+
+/* Pager */
+.pager { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-top: 56px; padding-top: 24px; border-top: 1px solid var(--line); }
+.pager a { text-decoration: none; font-weight: 500; }
+
+/* Intro-specific */
+.roadmap { display: grid; gap: 0; margin: 28px 0; border-top: 1px solid var(--line); }
+.roadmap a { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 4px 14px; padding: 16px 4px; border-bottom: 1px solid var(--line); color: var(--fg); text-decoration: none; }
+.roadmap a:hover h3 { color: var(--accent); }
+.roadmap .n { font: 650 28px/1 var(--font-display); color: var(--accent-2); grid-row: span 2; }
+.roadmap h3 { margin: 0; font-size: 19px; }
+.roadmap p { margin: 0; color: var(--muted); font-size: 15px; grid-column: 2; }
+.roadmap .time { font: 13px var(--font-mono); color: var(--muted); white-space: nowrap; grid-column: 3; grid-row: 1; }
+@media (max-width: 520px) { .roadmap a { grid-template-columns: 34px minmax(0, 1fr); } .roadmap .time { grid-column: 2; grid-row: auto; } }
+
+/* highlight.js tokens from the palette */
+.hljs-keyword, .hljs-built_in, .hljs-literal { color: var(--accent-2); }
+.hljs-string, .hljs-regexp { color: var(--good); }
+.hljs-number, .hljs-title, .hljs-title.function_ { color: var(--accent); }
+.hljs-comment, .hljs-meta { color: var(--muted); font-style: italic; }
+.hljs-attr, .hljs-params, .hljs-variable { color: var(--code-fg); }
+
+</style>
+<script>
+window.MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['\\[', '\\]'], ['$$', '$$']],
+    macros: { E: '\\mathbb{E}', rms: '\\operatorname{rms}', Cov: '\\operatorname{Cov}' }
+  },
+  svg: { fontCache: 'global' },
+  options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-svg.js" async></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+<div class="shell"><nav class="toc" aria-label="Contents"><p class="toc-brand">DiffusionART<br><span>a guided path</span></p><ol class="toc-list"><li class="toc-step"><a href="step-1.html"><span class="num">1</span>Flow matching and sampling</a></li><li class="toc-step"><a href="step-2.html"><span class="num">2</span>From LLM RL to diffusion RL</a></li><li class="toc-step"><a href="step-3.html"><span class="num">3</span>The baselines</a></li><li class="toc-step"><a href="step-4.html"><span class="num">4</span>The DiffusionART paper</a></li><li class="toc-step current"><a href="step-5.html"><span class="num">5</span>Reading and running the code</a><ol><li><a href="#s5-why">Why read the implementation at all</a></li><li><a href="#s5-map">Repository map</a></li><li><a href="#s5-cpu-trace">One iteration of the CPU smoke test, traced</a></li><li><a href="#s5-rollout">How the rollout works</a></li><li><a href="#s5-covariance">covariance.py: computing $G(c)$</a></li><li><a href="#s5-artloss">art.py: frozen targets and the trust-region mask</a></li><li><a href="#s5-objectives">objectives.py and update.py: two disjoint updates</a></li><li><a href="#s5-minimal">A standalone re-implementation, checked against the repo</a></li><li><a href="#s5-baselines">The baselines in the same framework</a></li><li><a href="#s5-config">The config system</a></li><li><a href="#s5-run-cpu">Running it on a laptop: the CPU smoke test</a></li><li><a href="#s5-run-gpu">Running it on GPUs</a></li><li><a href="#s5-debug">A debugging plan for one iteration</a></li><li><a href="#s5-experiments">Experiments to build intuition</a></li><li><a href="#s5-porting">Porting notes for an LLM RL framework</a></li><li><a href="#s5-pitfalls">Pitfalls collected</a></li><li><a href="#s5-exercises">Exercises</a></li></ol></li></ol><p class="toc-alt"><a href="index.html">Full tutorial on one page</a></p></nav><main class="content"><section class="step" id="step-5" data-title="Reading the code">
+<header class="step-head">
+  <p class="eyebrow">Step 5 · about 1 day</p>
+  <h2>Reading and running the DiffusionART code</h2>
+  <p class="lede">After this step you can trace one DiffusionART iteration through the real repository from YAML to optimizer step, map every tensor in the core kernels to the paper's symbols, run the CPU smoke test and a paper recipe, and set up fair experiments against the baselines that live in the same framework.</p>
+</header>
+
+<h3 id="s5-why">Why read the implementation at all</h3>
+<p>Steps 1 to 4 gave you the algorithm as three equations: a covariance guidance $G(c)$, a frozen target $v_{\text{tgt}} = v_\theta^{(0)} + G(c)$ on visited ODE states, and two disjoint MSE updates with a trust-region mask. The paper's Algorithm 1 fits in eight lines. The repository that produced the paper's numbers is roughly 17,000 lines of Python. Most of that code is not the algorithm. It is model adapters, reward wrappers, asset preparation, distributed bookkeeping, checkpointing and evaluation, and it encodes dozens of decisions that the paper does not mention: a sign convention, an $\varepsilon$ floor, an unbiased estimator, a gradient clip, a loss denominator that ignores microbatching, a rule for prompts whose $K$ rewards are all equal.</p>
+<p>Those decisions matter when you reproduce a curve, compare against a baseline, or port the method into your own stack. This chapter is a guided tour. We start from a map, trace one iteration of the CPU smoke test with real printed tensors, read the three core files line by line, and finish with commands for real GPU runs, a debugging plan, intuition-building experiments and porting notes for a Megatron + SGLang style framework.</p>
+<div class="callout llm"><p class="callout-title">From LLM RL</p><p>The shape of the code will feel familiar: a rollout phase that produces a cache, a scoring phase, an advantage-like statistic computed per prompt group, and a training phase with a fixed number of optimizer steps per rollout. The differences are in what the cache holds (continuous latent tensors and velocities, not token ids and logprobs), what the "advantage" is (a direction in latent space shared by all states of a prompt, not a scalar per sample), and what the loss is (a regression, not a ratio objective).</p></div>
+
+<h3 id="s5-map">Repository map</h3>
+<p>The repository installs as the package <code>visual-diffusion-rl</code> with one console script, <code>visual-rl</code>, that points to <code>visual_rl.train:main</code>. Everything under <code>src/visual_rl/</code> splits into four layers: pure kernels with no model knowledge, model-independent training plumbing, backends that own a concrete model family, and the supporting cast (models, rewards, evaluation, assets).</p>
+<figure class="code">
+  <figcaption><span class="tag">DiffusionART/ · annotated tree</span> what each package is for (files that matter for this chapter are named)</figcaption>
+  <pre><code class="language-text">DiffusionART/
+├── configs/
+│   ├── examples/            short integration recipes (4 updates); cpu_smoke.yaml is the CPU test
+│   └── paper/               full-budget recipes: image/*.yaml (SD3.5-M, FLUX), video/*.yaml (Hunyuan, Wan)
+│       └── *-assets.yaml    pinned HF snapshots and prompt URLs, prepared before workers start
+├── docs/                    contracts: algorithm-provenance.md is the kernel spec; runner guides per model
+├── environments/            pinned lock files for the separate video environments
+├── src/visual_rl/
+│   ├── train.py             CLI: parse args, load config, prepare assets, exec torchrun or call backend.run
+│   ├── config.py            frozen dataclasses, `extends:` inheritance, ${ENV} expansion, config fingerprint
+│   ├── registry.py          model name -> Backend(tasks, algorithms, rewards, precisions, distributed, entrypoint)
+│   ├── sampling.py          flow_transition (ODE / Flow-SDE / Dance / CPS), shifted_schedule
+│   ├── algorithms/          PURE KERNELS: tensors in, per-item losses or statistics out
+│   │   ├── covariance.py    art_scalar_covariance, art_pairwise_covariance  -> G(c)
+│   │   ├── art.py           art_loss: frozen target, t-weighting, trust-region mask
+│   │   ├── nft.py           nft_loss (DiffusionNFT mirror objective), old_policy_decay (EMA schedule)
+│   │   ├── policy.py        clipped_grpo_loss (Flow-GRPO, Fast, Dance), flowdppo_loss, transition KL
+│   │   └── refl.py          refl_loss: negative weighted differentiable reward
+│   ├── training/            MODEL-INDEPENDENT PLUMBING
+│   │   ├── rollout.py       collect_rollout -> Rollout cache; endpoint_renoising for NFT
+│   │   ├── objectives.py    disjoint_windows, group_advantages, ARTObjective / GRPOObjective / NFTObjective
+│   │   ├── update.py        accumulated_step: microbatch accumulation with a fixed denominator, clip, step
+│   │   ├── nft.py, nft_sampling.py      image NFT state (old policy + eval EMA), DPM2 endpoint sampler
+│   │   ├── grpo.py, grpo_sampling.py    image Flow-GRPO / Fast / DPPO / Dance rollouts and updates
+│   │   ├── video_grpo.py, dance_video.py, video_nft.py, video_refl.py, refl_vjp.py   video baselines
+│   │   ├── video_pairwise.py            DiffusionART-Pairwise for Hunyuan (tie anchors across ranks)
+│   │   ├── multi_reward.py  per-prompt normalized multi-reward advantages (image four-reward recipe)
+│   │   ├── distributed.py, sharding.py, fsdp_shadow.py, *checkpoint*.py   DDP/FSDP, CPU shadow params
+│   │   └── state.py         Progress, CostClock (GPU-hour clocks), PolicyShadow (NFT old policy)
+│   ├── backends/            ONE RUN LOOP PER MODEL FAMILY
+│   │   ├── tensor_fixture.py   4-D toy "latent" + tiny MLP, CPU only; every algorithm in ~200 lines
+│   │   ├── sd3.py, image_ddp.py   SD3.5 and FLUX single device and DDP
+│   │   ├── hunyuan.py, hunyuan_fsdp.py   HunyuanVideo T2V single device and FULL_SHARD FSDP
+│   │   └── wan.py              Wan2.1 I2V (distilled)
+│   ├── models/              diffusers/native adapters: text encoding, LoRA/full finetune, predict_velocity, VAE
+│   ├── rewards/             PickScore, GenEval, OCR, CLIPScore, Aesthetic, HPSv2, VideoReward, composite
+│   ├── evaluation/          evaluation manifests, galleries, I2V reference preparation
+│   ├── prepare_assets.py    HF snapshot/prompt download and SHA256 checks (network only here)
+│   └── wandb_export.py      separate CPU process that replays metrics.jsonl into W&amp;B
+└── tests/                   ~100 CPU test files; tests/test_algorithms*.py pin the kernels</code></pre>
+</figure>
+<p>The split between <code>algorithms/</code> and <code>training/</code> is the most useful thing to internalize. A kernel like <code>art_loss</code> never sees a model, an optimizer or a rank. It receives a batch of current predictions and frozen tensors and returns a <em>per-item</em> loss vector of shape <code>[N]</code>. The caller owns the denominator, the microbatching and the optimizer boundary. This is the same separation a good LLM RL framework draws between "compute per-token loss" and "reduce and step".</p>
+<p>The diagram below follows one training iteration through the real function names. Teal boxes are the rollout stage, vermilion boxes are what is specific to DiffusionART.</p>
+<figure class="diagram">
+  <svg viewBox="0 0 790 680" role="img" aria-label="Data flow of one DiffusionART training iteration through the repository's functions">
+    <defs>
+      <marker id="s5-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/>
+      </marker>
+    </defs>
+    <g style="font-family:inherit">
+      <rect x="40" y="16" width="680" height="54" rx="8" style="fill:var(--surface);stroke:var(--muted);stroke-width:1.5"/>
+      <text x="56" y="38" style="fill:var(--fg);font-size:14px;font-weight:600">1 · Config and backend</text>
+      <text x="56" y="58" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">train.main → load_config() → registry.get_backend() → backend.run(config)</text>
+
+      <rect x="40" y="96" width="680" height="54" rx="8" style="fill:var(--surface);stroke:var(--muted);stroke-width:1.5"/>
+      <text x="56" y="118" style="fill:var(--fg);font-size:14px;font-weight:600">2 · Prompts for this rollout (P global, P/world per rank)</text>
+      <text x="56" y="138" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">stream.take(P) · groups = arange(P).repeat_interleave(K) · cached text conditioning</text>
+
+      <rect x="40" y="176" width="680" height="64" rx="8" style="fill:var(--surface);stroke:var(--accent);stroke-width:2"/>
+      <text x="56" y="198" style="fill:var(--fg);font-size:14px;font-weight:600">3 · ODE rollout with the current weights = θ_old (no grad)</text>
+      <text x="56" y="217" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">collect_rollout(predict, noise, sigmas, selected=…): Euler x + dt·v per step</text>
+      <text x="56" y="233" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">caches states[N,S,…], old_velocities[N,S,…], endpoints[N,…] as fp32 on CPU</text>
+
+      <rect x="40" y="266" width="680" height="54" rx="8" style="fill:var(--surface);stroke:var(--accent);stroke-width:2"/>
+      <text x="56" y="288" style="fill:var(--fg);font-size:14px;font-weight:600">4 · Decode endpoints and score them</text>
+      <text x="56" y="308" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">decode_and_score_images() / score_videos() → scores.weighted [N]</text>
+
+      <rect x="40" y="346" width="680" height="54" rx="8" style="fill:var(--surface);stroke:var(--accent-2);stroke-width:2"/>
+      <text x="56" y="368" style="fill:var(--fg);font-size:14px;font-weight:600">5 · Covariance guidance per prompt group: G(c)</text>
+      <text x="56" y="388" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">art_scalar_covariance() | art_pairwise_covariance() → group_directions</text>
+
+      <rect x="40" y="426" width="680" height="54" rx="8" style="fill:var(--surface);stroke:var(--accent-2);stroke-width:2"/>
+      <text x="56" y="448" style="fill:var(--fg);font-size:14px;font-weight:600">6 · Freeze targets and split into two disjoint windows</text>
+      <text x="56" y="468" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">ARTObjective(cache, predict, directions, magnitudes, anchors) · disjoint_windows()</text>
+
+      <rect x="40" y="506" width="330" height="70" rx="8" style="fill:var(--surface);stroke:var(--accent-2);stroke-width:2"/>
+      <text x="56" y="528" style="fill:var(--fg);font-size:14px;font-weight:600">7a · Update 1 on window B₁</text>
+      <text x="56" y="547" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">accumulated_step(window 1)</text>
+      <text x="56" y="565" style="fill:var(--muted);font-size:12px">force ∝ t·G(c); mask inactive (d = 0)</text>
+
+      <rect x="390" y="506" width="330" height="70" rx="8" style="fill:var(--surface);stroke:var(--accent-2);stroke-width:2"/>
+      <text x="406" y="528" style="fill:var(--fg);font-size:14px;font-weight:600">7b · Update 2 on window B₂</text>
+      <text x="406" y="547" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">accumulated_step(window 2)</text>
+      <text x="406" y="565" style="fill:var(--muted);font-size:12px">force ∝ t·(G − d); trust-region mask</text>
+
+      <rect x="40" y="602" width="680" height="54" rx="8" style="fill:var(--surface);stroke:var(--muted);stroke-width:1.5"/>
+      <text x="56" y="624" style="fill:var(--fg);font-size:14px;font-weight:600">8 · Log, evaluate, checkpoint</text>
+      <text x="56" y="644" style="fill:var(--muted);font-size:12px;font-family:ui-monospace,monospace">metrics.jsonl (→ wandb_export) · evaluate() every N · save_checkpoint()</text>
+    </g>
+    <g style="stroke:var(--muted);stroke-width:1.5;fill:none">
+      <line x1="380" y1="70" x2="380" y2="94" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="150" x2="380" y2="174" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="240" x2="380" y2="264" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="320" x2="380" y2="344" marker-end="url(#s5-arrow)"/>
+      <line x1="380" y1="400" x2="380" y2="424" marker-end="url(#s5-arrow)"/>
+      <line x1="300" y1="480" x2="205" y2="504" marker-end="url(#s5-arrow)"/>
+      <line x1="460" y1="480" x2="555" y2="504" marker-end="url(#s5-arrow)"/>
+      <line x1="370" y1="541" x2="388" y2="541" marker-end="url(#s5-arrow)"/>
+      <line x1="555" y1="576" x2="555" y2="600" marker-end="url(#s5-arrow)"/>
+      <path d="M720,629 L760,629 L760,208 L722,208" marker-end="url(#s5-arrow)"/>
+    </g>
+    <text x="772" y="420" transform="rotate(-90 772 420)" style="fill:var(--muted);font-size:12px;text-anchor:middle">next rollout: θ_old ← θ (no EMA)</text>
+    <text x="380" y="499" style="fill:var(--muted);font-size:11px;text-anchor:middle">same frozen targets</text>
+  </svg>
+  <figcaption>One DiffusionART iteration in the repository. Boxes 3–4 are the rollout stage, 5–7 the method. The old-policy velocity is never recomputed: it is the prediction cached in box 3. Two optimizer steps happen per rollout, so <code>train/optimizer_step</code> advances by 2 per iteration.</figcaption>
+</figure>
+
+<h4>From the CLI to a backend</h4>
+<p><code>visual-rl --config X.yaml</code> runs <code>train.main</code>. It plans assets without network access, loads the config, validates it against the backend, and then either prepares assets and <code>os.execv</code>s into <code>torch.distributed.run</code> (when you pass <code>--nproc-per-node</code>) or calls the backend's <code>run</code> function in-process. The backend is chosen by <code>model.name</code>, not by the algorithm. Each backend declares which algorithms, rewards, precisions and distributed modes it accepts:</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/registry.py · L99–106</span> the SD3 backend accepts six algorithms through one run loop</figcaption>
+  <pre><code class="language-python">register_backend(Backend(
+    name="sd3", tasks=frozenset({"t2i"}),
+    distributed=frozenset({"none", "ddp"}),
+    algorithms=frozenset({"diffusionart", "diffusionnft", "flow_grpo", "flow_grpo_fast", "flow_dppo", "dancegrpo"}),
+    rewards=frozenset({"pickscore", "aesthetic", "clipscore", "hpsv2", "ocr", "geneval", "composite"}), precisions=frozenset({"fp32", "bf16", "fp16"}),
+    entrypoint="visual_rl.backends.sd3:run", config_validator="visual_rl.backends.sd3:validate_config",
+    status="native development runner; image DDP integration, paper/GPU acceptance pending",
+))</code></pre>
+</figure>
+<p>So <em>the algorithm is a config field and the run loop is per model</em>. A fair comparison between DiffusionART and Flow-GRPO-Fast on SD3 runs the same <code>backends/sd3.py</code> loop with the same prompt stream, decode, reward and evaluation code; only the branch that builds the rollout cache and the objective differs. We will see that branch shortly.</p>
+
+<h3 id="s5-cpu-trace">One iteration of the CPU smoke test, traced</h3>
+<p>The fastest way into the code is the tensor fixture, <code>backends/tensor_fixture.py</code>. It replaces the diffusion transformer with a two-layer MLP over a 4-dimensional "latent" (input: state, $t$, a scalar prompt condition), and replaces the reward model with $R(x_0,c) = -\tfrac14\lVert x_0 - c\mathbf 1\rVert^2$. Everything else (rollout cache, covariance, objective, accumulation, checkpointing, status file) is the production code path. The run loop is about 120 lines, and for DiffusionART it is exactly this:</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/backends/tensor_fixture.py · L139–151</span> setup: groups, schedule, selected timesteps, reward</figcaption>
+  <pre><code class="language-python">    clock = CostClock(progress, gpu_count=0)
+    groups = torch.arange(p).repeat_interleave(k)
+    condition = groups.float() / p
+    sigmas = shifted_schedule(config.sampling.steps, 1.0)
+    selected = tuple(range(config.sampling.steps - 1))
+
+    def predict(state, sigma, rows):
+        return model(state, sigma, condition[rows])
+
+    def score(endpoint, rows=None):
+        c = condition if rows is None else condition[rows]
+        return -(endpoint - c[:, None]).square().mean(1)
+</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/backends/tensor_fixture.py · L183–194</span> the ART branch: reward, guidance, objective, windows</figcaption>
+  <pre><code class="language-python">                rewards = score(cache.endpoints).detach()
+                if algorithm == "diffusionart":
+                    statistics = art_scalar_covariance(cache.endpoints, rewards, groups, p)
+                    objective = ARTObjective(
+                        cache,
+                        predict,
+                        statistics["group_directions"][groups],
+                        statistics["group_guidance_magnitudes"][groups],
+                        torch.zeros(p * k, dtype=torch.bool),
+                        torch.device("cpu"),
+                    )
+                    windows = disjoint_windows(p * k, len(chosen))</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/backends/tensor_fixture.py · L252–264</span> two optimizer steps, one per disjoint window</figcaption>
+  <pre><code class="language-python">                for items in windows:
+                    metrics = accumulated_step(
+                        model,
+                        optimizer,
+                        items,
+                        objective,
+                        microbatch=config.training.microbatch,
+                        denominator=len(items),
+                        max_grad_norm=config.training.grad_clip,
+                    )
+                    if shadow:
+                        shadow.update(old_policy_decay(progress.optimizer_steps, "slow-ema"))
+                    progress.optimizer_steps += 1</code></pre>
+</figure>
+<p>With <code>cpu_smoke.yaml</code> ($P=2$ prompts, $K=4$ samples per prompt, 4 Euler steps, training microbatch 3), I re-ran the first iteration with prints at every stage. The script re-creates the fixture's seeds in the same order, so its numbers must match the <code>metrics.jsonl</code> produced by the real CLI run shown later. They do, to the last printed digit (<code>train/loss</code> 0.7499999950 and 0.7081089839, grad norms 1.1816 and 1.3577).</p>
+<figure class="code">
+  <figcaption><span class="tag">real output · tutorial/scratch/step5/trace_iteration.py</span> one ART iteration of cpu_smoke.yaml, stage by stage</figcaption>
+  <pre><code class="language-text">sigmas [1.0, 0.75, 0.5, 0.25, 0.0] selected (0, 1, 2)
+cache.states (8, 3, 4) old_velocities (8, 3, 4) endpoints (8, 4) old_log_probs None
+rewards [-3.8444, -1.4645, -1.4721, -0.8861, -1.1182, -0.9979, -0.6095, -0.5849]
+group_reward_means         [-1.9167953729629517, -0.8276233673095703]
+group_reward_abs_means     [0.9638229608535767, 0.23042573034763336]
+group_covariance_rms       [1.4715924263000488, 0.05131416767835617]
+group_guidance_magnitudes  [1.0, 1.0]
+group_active               [True, True]
+group_directions [[-1.5173, -0.6484, -0.7602, 0.8363], [-1.2237, 1.2593, 0.5772, 0.7639]]
+window sizes [12, 12] first items of window 2 ((4, 0), (4, 1), (4, 2), (5, 0))
+update 1: train/loss=0.7499999950 grad_norm=1.1816 microbatch calls=4 masked=0/12 max m(s)=2.46e-16 outward rows=4
+update 2: train/loss=0.7081089839 grad_norm=1.3577 microbatch calls=4 masked=1/12 max m(s)=1.41e-05 outward rows=8</code></pre>
+</figure>
+<p>Read it top to bottom as a worked example.</p>
+<ul>
+  <li><strong>Schedule.</strong> $t \in \{1, 0.75, 0.5, 0.25, 0\}$. The fixture trains on the first three states (<code>selected = (0, 1, 2)</code>); the last interval is not trained.</li>
+  <li><strong>Cache.</strong> <code>states</code> and <code>old_velocities</code> have shape <code>[N, S, D] = [8, 3, 4]</code>: 8 trajectories, 3 cached states each, 4 latent dimensions. There are no log-probabilities (<code>None</code>): an ODE rollout has no transition density, and ART does not need one.</li>
+  <li><strong>Rewards and guidance.</strong> Prompt 0 has rewards with mean $-1.917$ and spread (mean absolute deviation) $0.964$; prompt 1 is much tighter (MAD $0.230$). Its raw covariance has RMS $0.051$, 29 times smaller than prompt 0's $1.47$. After normalization both prompts get a guidance direction of unit RMS and magnitude $1.0$. This is the paper's claim in numbers: the guidance scale does not depend on the reward scale or spread.</li>
+  <li><strong>Windows.</strong> Each window holds 12 items, one per (trajectory, cached timestep) pair: 4 trajectories × 3 timesteps. Window 2 starts at trajectory 4, so in this fixture window 1 is all of prompt 0 and window 2 is all of prompt 1. We come back to this split later.</li>
+  <li><strong>Update 1 loss is exactly the mean of $t$.</strong> At update 1 the parameters equal $\theta_{\text{old}}$, so $v_\theta = v_\theta^{(0)}$ on every cached state and the residual is exactly $G(c)$, whose MSE is $\operatorname{rms}(G)^2 = 1$. The loss is the $t$-weighted mean: $\tfrac13(1 + 0.75 + 0.5) = 0.75$. This identity is a free sanity check on any real run (see the GPU section).</li>
+  <li><strong>Update 2.</strong> The first update moved the shared MLP, so on window 2's states the drift $d$ is nonzero. The KL proxy reaches $1.41\times10^{-5}$, above $\delta=10^{-5}$, and 1 of 12 items is masked. The loss fell to $0.708$ because the displacement $d$ already points partly along $G$, so $\lVert G-d\rVert^2 &lt; \lVert G\rVert^2$ on most items.</li>
+</ul>
+
+<h3 id="s5-rollout">How the rollout works</h3>
+<h4>The sampler and the cache</h4>
+<p><code>collect_rollout</code> in <code>training/rollout.py</code> is the single rollout function used by ART and, with stochastic steps enabled, by the GRPO family. For ART every step is deterministic Euler. The model is called once per step per microbatch, the transition is applied, and if the step index is one of the <em>selected</em> training timesteps, the input state, the predicted velocity, the next state and the transition mean are copied to CPU in fp32.</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/training/rollout.py · L107–157</span> allocate the cache, run the sampler per microbatch, store selected steps</figcaption>
+  <pre><code class="language-python">    batch, slots = len(noise), len(selected)
+    shape = (batch, slots, *noise.shape[1:])
+    states, velocities, following, means = [
+        torch.empty(shape, dtype=torch.float32) for _ in range(4)
+    ]
+    stds = torch.empty((batch, slots), dtype=torch.float32)
+    log_probs = torch.empty((batch, slots), dtype=torch.float32) if stochastic else None
+    endpoints = torch.empty_like(noise, device="cpu", dtype=torch.float32)
+    lookup = {step: slot for slot, step in enumerate(selected)}
+    for start in range(0, batch, microbatch):
+        end = min(start + microbatch, batch)
+        rows = torch.arange(start, end, device=noise.device)
+        state = noise[start:end].detach().clone()
+        for index in range(count):
+            t = sigmas[index].to(device=state.device).expand(end - start)
+            velocity = predict(state, t, rows)
+            if endpoint_kind == "last_x0" and index == count - 1:
+                final_endpoint = state.float() - t.reshape((-1,) + (1,) * (state.ndim - 1)) * velocity.float()
+            kind = transition_kind if index in stochastic else unselected_kind
+            result = transition_fn(
+                state,
+                velocity,
+                t,
+                sigmas[index + 1],
+                kind=kind,
+                noise_level=noise_level,
+                sigma_max=float(sigmas[1]),
+                likelihood=likelihood,
+                innovation=innovations[index][start:end].to(state.device)
+                if index in stochastic
+                else None,
+            )
+            next_state = result.sample.to(noise.dtype) if preserve_state_dtype else result.sample
+            if index in lookup or row_selected is not None:
+                if row_selected is None:
+                    local_rows = torch.arange(end - start)
+                    slots_at_step = torch.full_like(local_rows, lookup[index])
+                else:
+                    local_rows, slots_at_step = (row_selected[start:end] == index).nonzero(as_tuple=True)
+                if len(local_rows):
+                    rows_at_step = local_rows + start
+                    source_rows = local_rows.to(state.device)
+                    states[rows_at_step, slots_at_step] = state[source_rows].float().cpu()
+                    velocities[rows_at_step, slots_at_step] = velocity[source_rows].float().cpu()
+                    following[rows_at_step, slots_at_step] = next_state[source_rows].float().cpu()
+                    means[rows_at_step, slots_at_step] = result.mean[source_rows].float().cpu()
+                    stds[rows_at_step, slots_at_step] = result.std.flatten().expand(end - start).cpu()[local_rows]
+                    if log_probs is not None:
+                        log_probs[rows_at_step, slots_at_step] = result.log_prob.cpu()[local_rows]
+            state = next_state
+        endpoints[start:end].copy_((final_endpoint if endpoint_kind == "last_x0" else state).cpu())</code></pre>
+</figure>
+<p>Variable to paper mapping: <code>noise</code> is $x_1 = \epsilon$; <code>state</code> at loop index $i$ is $x_{t_i}$, with <code>t = sigmas[index]</code> $=t_i$; <code>velocity</code> is the cached rollout prediction, the paper's $v_\theta^{(0)}(s_t)$ <em>up to sign</em> (next callout); <code>states[row, slot]</code> is the visited state $s_t$; <code>endpoints</code> is $x_0^{(i)}$. Microbatching here is purely physical: inputs and innovations are fixed before the loop, so the cache does not depend on <code>sampling.microbatch</code>.</p>
+<div class="callout warn"><p class="callout-title">Pitfall: the code's velocity has the opposite sign</p><p>The repo follows diffusers/SD3: the network predicts $\tilde v = \epsilon - x_0$, and <code>flow_transition</code> integrates with <code>mean = x + dt * v</code> where <code>dt = sigma_next - sigma</code> is <em>negative</em>. Writing $h = t - t_{\text{next}} &gt; 0$, the code's step is $x_{t-h} = x_t - h\tilde v$. The paper's step is $x_{t-h} = x_t + h v$ with $v = x_0 - \epsilon$. So everywhere in the code
+$\tilde v = -v$, <code>dt</code> $= -h$, the cached <code>old_velocities</code> are $-v_\theta^{(0)}$, and a code target <code>old - G</code> is the paper's $v_\theta^{(0)} + G$. Keep this one substitution in mind and every sign in <code>art.py</code> lines up with the paper.</p></div>
+
+<h4>Which timesteps are trained</h4>
+<p>The cache holds only selected steps, and the set differs by backend:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Backend / recipe</th><th>Rollout steps</th><th>Trained states per trajectory</th><th>Where</th></tr></thead>
+<tbody>
+<tr><td>tensor fixture</td><td><code>sampling.steps</code></td><td>first <code>steps − 1</code></td><td><code>tensor_fixture.py</code> L143</td></tr>
+<tr><td>SD3.5-M paper (ART)</td><td>10, shift 3</td><td>all 10 (<code>train_timesteps: [0..9]</code>)</td><td><code>sd3.py</code> L720</td></tr>
+<tr><td>HunyuanVideo paper (ART)</td><td>16, shift 5</td><td>9 drawn per video from the first 15 (<code>train_timestep_count</code>, <code>train_timestep_pool</code>)</td><td><code>hunyuan.py</code> L204–211</td></tr>
+</tbody></table></div>
+<p>Hunyuan uses <code>row_selected</code>: each video gets its own random 9-of-15 subset drawn from a CPU generator seeded by <code>(seed, attempt, rank)</code>. The cache is then indexed by <code>(row, slot)</code> and <code>Rollout.indices</code> maps a slot back to its step index per row.</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/backends/hunyuan.py · L204–211</span> per-video random timestep subsets</figcaption>
+  <pre><code class="language-python">def _rollout_inputs(c, attempt, rank=0):
+    generator = torch.Generator(device="cpu").manual_seed((c.seed + 1_000_003 * attempt + 10_007 * rank) % (2**63 - 1))
+    rows = c.sampling.prompts_per_rollout * c.sampling.samples_per_prompt
+    noise = torch.randn(_shape(c, rows), generator=generator,
+                        dtype=torch.bfloat16 if c.training.precision == "bf16" else torch.float32)
+    pool = torch.tensor(c.sampling.options["train_timestep_pool"])
+    selected = torch.stack([pool[torch.randperm(len(pool), generator=generator)[:c.sampling.options["train_timestep_count"]]] for _ in range(rows)])
+    return noise, selected</code></pre>
+</figure>
+
+<h4>What is reused, and what it costs in memory</h4>
+<p>ART's efficiency claim (README, "Reuse rollout predictions") is that training re-uses the rollout states and their old predictions. NFT, by contrast, re-noises each endpoint to fresh states and needs an extra no-grad forward of the old policy on those new states. In ART the only model calls per iteration are the rollout forwards (no grad) and one forward plus backward of the current policy per trained (trajectory, timestep) item.</p>
+<p>The price is CPU memory. The cache holds four tensors of shape $[N_{\text{rank}}, S, \text{latent}]$ in fp32: <code>states</code>, <code>old_velocities</code>, <code>next_states</code>, <code>old_means</code>. A worked example for the two paper recipes:</p>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>SD3.5-M PickScore, 8 GPUs</th><th>HunyuanVideo 721, 32 GPUs</th></tr></thead>
+<tbody>
+<tr><td>Latent per sample</td><td>$16\times64\times64 = 65{,}536$ floats = 256 KiB</td><td>$16\times14\times60\times60 = 806{,}400$ floats = 3.08 MiB</td></tr>
+<tr><td>Trajectories per rank</td><td>$64/8 \times 18 = 144$</td><td>$32/32 \times 8 = 8$</td></tr>
+<tr><td>Cached states per trajectory $S$</td><td>10</td><td>9</td></tr>
+<tr><td>Cache (4 tensors)</td><td>$4\times144\times10\times256$ KiB $\approx 1.41$ GiB</td><td>$4\times8\times9\times3.08$ MiB $\approx 0.87$ GiB</td></tr>
+<tr><td>Items per update window</td><td>$72\times10 = 720$</td><td>$4\times9 = 36$</td></tr>
+<tr><td>Physical microbatches per update</td><td>$720/9 = 80$</td><td>$\lceil 36/8\rceil = 5$</td></tr>
+</tbody></table></div>
+<p>For comparison, 144 LLM responses of 4k tokens are about 4.7 MB of int64 token ids. A diffusion rollout cache is two to three orders of magnitude larger, and only <code>states</code> and <code>old_velocities</code> are read by ART (the other two exist for GRPO's likelihood replay and for Hunyuan's old-velocity reconstruction). The latent frame count for Hunyuan is $(53-1)/4+1 = 14$ (<code>hunyuan.py</code> L175).</p>
+
+<h3 id="s5-covariance">covariance.py: computing $G(c)$</h3>
+<p>Recall the paper's estimator (§4.1):</p>
+<div class="math-block">\[
+\overline{\operatorname{Cov}}(R,x_0\mid c)=\frac1K\sum_{i=1}^{K}(R_i-\bar R_c)\,(x_0^{(i)}-\bar x_{0,c}),
+\qquad G(c)=\frac{\overline{\operatorname{Cov}}}{\operatorname{rms}(\overline{\operatorname{Cov}})},
+\qquad \operatorname{rms}(a)=\sqrt{\tfrac1D\textstyle\sum_j a_j^2}.
+\]</div>
+<p>Here $D$ is the number of latent coordinates. The kernel computes this for all prompt groups at once with <code>index_add_</code>, so it is vectorized over groups and never loops in Python:</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/covariance.py · L57–108</span> art_scalar_covariance: group statistics, covariance, normalization</figcaption>
+  <pre><code class="language-python">    x = endpoints.detach().float().flatten(1)
+    r = rewards.detach().to(device=x.device, dtype=torch.float32).reshape(-1)
+    groups = row_group_indices.to(device=x.device, dtype=torch.long).reshape(-1)
+    if r.numel() != len(x) or groups.numel() != len(x):
+        raise ValueError("rewards and groups must match the endpoint count")
+    if (groups &lt; 0).any() or (groups &gt;= group_count).any():
+        raise ValueError("group index out of range")
+    if not torch.isfinite(x).all() or not torch.isfinite(r).all():
+        raise ValueError("endpoints and rewards must be finite")
+    counts = torch.bincount(groups, minlength=group_count).float()
+    sums = x.new_zeros(group_count).index_add_(0, groups, r)
+    square_sums = x.new_zeros(group_count).index_add_(0, groups, r.square())
+    means = sums / counts.clamp_min(1)
+    stds = (square_sums / counts.clamp_min(1) - means.square()).clamp_min(0).sqrt()
+    centered = r - means[groups]
+    if zero_signal_mode == "exact":
+        maxima = r.new_full((group_count,), -torch.inf).scatter_reduce_(0, groups, r, reduce="amax")
+        minima = r.new_full((group_count,), torch.inf).scatter_reduce_(0, groups, r, reduce="amin")
+        constant = maxima == minima
+        # Summing identical FP32 rewards can round their mean away from the reward.
+        centered = torch.where(constant[groups], 0.0, centered)
+        means = torch.where(constant, maxima, means)
+        stds = torch.where(constant, 0.0, stds)
+    mad = x.new_zeros(group_count).index_add_(0, groups, centered.abs()) / counts.clamp_min(1)
+    numerator = x.new_zeros(group_count, x.shape[1]).index_add_(0, groups, centered[:, None] * x)
+    denominator = (counts - int(reduction == "unbiased")).clamp_min(1)
+    covariance = numerator / denominator[:, None]
+    covariance = torch.where((counts &gt; 1)[:, None], covariance, 0.0)
+    rms = covariance.square().mean(1).sqrt()
+    magnitudes = {
+        "reward_mad": mad,
+        "raw_covariance": rms,
+        "reward_std_normalized_covariance": rms / (stds + eps),
+        "unit_normalized_covariance": torch.ones_like(rms),
+    }[scale_mode] * gain
+    signal = covariance / torch.where(mad &gt; 0, mad, 1.0)[:, None]
+    signal_rms = signal.square().mean(1).sqrt()
+    active = (counts &gt; 1) &amp; (mad &gt; 0) &amp; (signal_rms &gt; 0) &amp; (magnitudes &gt; 0)
+    if zero_signal_mode == "exact":
+        magnitudes = torch.where(active, magnitudes, 0.0)
+    if zero_signal_mode == "threshold":
+        maxima = r.new_full((group_count,), -torch.inf).scatter_reduce_(0, groups, r, reduce="amax")
+        minima = r.new_full((group_count,), torch.inf).scatter_reduce_(0, groups, r, reduce="amin")
+        active &amp;= (maxima - minima &gt; atol) &amp; (rms &gt; atol)
+        magnitudes = torch.where(active, magnitudes, 0.0)
+    if direction_mode == "historical":
+        directions = signal / signal_rms.clamp_min(eps)[:, None]
+    else:
+        # Float64 norm avoids underflow for tiny but nonzero aggregates.
+        norm = covariance.double().square().mean(1).sqrt()
+        directions = (covariance.double() / torch.where(norm &gt; 0, norm, 1.0)[:, None]).float()
+    directions = torch.where(active[:, None], directions, 0.0)</code></pre>
+</figure>
+<div class="table-wrap"><table>
+<thead><tr><th>Code</th><th>Paper</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>x</code> <code>[N, D]</code></td><td>$x_0^{(i)}$ flattened</td><td>detached, cast to fp32 regardless of the model dtype</td></tr>
+<tr><td><code>r</code></td><td>$R_i$</td><td>already the <em>weighted, fixed-normalized</em> scalar (<code>scores.weighted</code>); multi-reward weights are combined before this call</td></tr>
+<tr><td><code>groups</code>, <code>counts</code></td><td>prompt $c(i)$, $K$</td><td>group index = prompt slot in this rollout</td></tr>
+<tr><td><code>means</code>, <code>centered</code></td><td>$\bar R_c$, $R_i-\bar R_c$</td><td></td></tr>
+<tr><td><code>numerator</code></td><td>$\sum_i (R_i-\bar R_c)\,x_0^{(i)}$</td><td>endpoints are not centered: since $\sum_i (R_i-\bar R_c)=0$, $\sum_i (R_i-\bar R_c)\bar x_{0,c} = 0$ and the result is identical</td></tr>
+<tr><td><code>denominator</code></td><td>$K$ (paper) vs $K-1$ (code)</td><td><code>reduction="unbiased"</code> by default; the constant cancels in normalization</td></tr>
+<tr><td><code>covariance</code></td><td>$\tfrac{K}{K-1}\overline{\operatorname{Cov}}$</td><td>zero for singleton groups</td></tr>
+<tr><td><code>mad</code></td><td>$\tfrac1K\sum_i \lvert R_i-\bar R_c\rvert$</td><td>not in the paper; see below</td></tr>
+<tr><td><code>signal</code>, <code>signal_rms</code></td><td>$\overline{\operatorname{Cov}}/\text{MAD}$, its rms</td><td>reward-scale-free intermediate</td></tr>
+<tr><td><code>directions</code></td><td>$G(c)$</td><td><code>signal / max(signal_rms, eps)</code>, <code>eps = 1e-5</code></td></tr>
+<tr><td><code>magnitudes</code></td><td>implicit 1</td><td><code>unit_normalized_covariance</code> gives $1\times$<code>guidance_gain</code></td></tr>
+<tr><td><code>active</code></td><td>(none)</td><td>group has $K&gt;1$ and nonzero reward spread and covariance</td></tr>
+</tbody></table></div>
+<h4>Where the code adds detail to the paper</h4>
+<ul>
+  <li><strong>The MAD pre-division and the $\varepsilon$ floor.</strong> In the default <code>direction_mode="historical"</code>, the covariance is first divided by the reward MAD and only then RMS-normalized with a floor: $G = S/\max(\operatorname{rms}(S),\varepsilon)$ with $S = \overline{\operatorname{Cov}}/\text{MAD}$. Dividing by MAD first makes the floor independent of the reward scale: multiplying all rewards by 100 changes neither $S$ nor whether the floor binds. When $\operatorname{rms}(S) \geq 10^{-5}$ (essentially always), the result equals the paper's $\overline{\operatorname{Cov}}/\operatorname{rms}(\overline{\operatorname{Cov}})$ exactly, because the scalar MAD cancels. <code>direction_mode="normalized_aggregate"</code> skips MAD and normalizes in float64; in the toy experiments below both modes give bit-identical training.</li>
+  <li><strong>Second normalization.</strong> <code>art_loss</code> RMS-normalizes the direction again (<code>direction_normalization="rms"</code>). If the floor ever did bind, this second normalization restores unit RMS. The final displacement is <code>magnitude * direction / rms(direction)</code>.</li>
+  <li><strong>Exact zero signal.</strong> Runners always pass <code>zero_signal_mode="exact"</code> for scalar ART (<code>sd3.py</code> L917, <code>hunyuan.py</code> L241). If all $K$ rewards of a prompt are bit-identical, summing them in fp32 can still round the mean away from the common value, making <code>centered</code> tiny but nonzero and producing a pure-noise direction after normalization. The exact mode zeroes such groups.</li>
+  <li><strong>Dtype.</strong> Endpoints and rewards are cast to fp32 here even when the model runs in bf16 or fp16. FLUX with bf16 casts the directions back to bf16 before the loss (<code>sd3.py</code> L920–923) to reproduce a historical run.</li>
+</ul>
+
+<h4>The pairwise variant</h4>
+<p>DiffusionART-Pairwise (§4.4 and Appendix) replaces $R_i$ by labels $y_i \in \{0, \tfrac12, 1\}$ from disjoint pairs, then calls the same scalar kernel:</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/covariance.py · L150–197</span> art_pairwise_covariance: seeded pairs, labels, shared covariance, tie anchors</figcaption>
+  <pre><code class="language-python">    labels = torch.full_like(scores, 0.5)
+    pairs = []
+    for group in range(len(endpoints) // group_size):
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            (int(seed) + 1_000_003 * (int(round_index) + int(group_offset) + group)) % (2**63 - 1)
+        )
+        pair = (
+            (torch.randperm(group_size, generator=generator) + group * group_size)
+            .reshape(-1, 2)
+            .to(scores.device)
+        )
+        left, right = pair.unbind(1)
+        label = torch.where(
+            scores[left] &gt; scores[right], 1.0, torch.where(scores[left] &lt; scores[right], 0.0, 0.5)
+        )
+        labels[left], labels[right] = label, 1.0 - label
+        pairs.append(pair)
+    groups = torch.arange(len(endpoints), device=endpoints.device) // group_size
+    result = art_scalar_covariance(
+        endpoints,
+        labels,
+        groups,
+        len(endpoints) // group_size,
+        reduction=reduction,
+        direction_mode=direction_mode,
+        zero_signal_mode=zero_signal_mode,
+        zero_signal_atol=zero_signal_atol,
+        eps=eps,
+    )
+    preference = labels != 0.5
+    any_active = (
+        bool(preference.any()) if any_preference_active is None else bool(any_preference_active)
+    )
+    active = result["group_active"][groups] &amp; preference
+    anchor = ~preference &amp; any_active
+    result.update(
+        {
+            "binary_rewards": labels,
+            "pair_rows": torch.cat(pairs),
+            "row_preference_active": preference,
+            "row_active": active,
+            "row_guidance_magnitudes": result["group_guidance_magnitudes"][groups]
+            * preference.float(),
+            "row_restore_anchor": anchor,
+            "row_trainable": active | anchor,
+        }
+    )</code></pre>
+</figure>
+<p>Mapping: <code>pair</code> is a seeded random partition of the group's $K$ rows into $M=K/2$ pairs; <code>labels</code> are $y_i$; the scalar kernel then computes $\overline{\operatorname{Cov}}(y, x_0\mid c)$, which by the paper's pairwise identity is proportional to $\sum_{j\,\text{non-tied}}(x^{\text{win}}_{0,j}-x^{\text{lose}}_{0,j})$, aggregated over all pairs of the prompt <em>before</em> normalization (prompt-global, not pair-local, guidance). The seed is <code>seed + 1000003·(round + group_offset + group)</code>, private to the call, so resuming reproduces the same pairs.</p>
+<p>One implementation detail goes beyond Algorithm 2 in the paper. The algorithm says every state of prompt $c$ gets target $v^{(0)}+G(c)$. In the code, <code>row_guidance_magnitudes</code> is multiplied by <code>preference</code>, so rows that belong to a <em>tied</em> pair get zero guidance. They become <code>row_restore_anchor</code> rows instead, which train toward $v^{(0)}$ itself (pure restoration), but only if some non-tied pair exists somewhere on any rank (<code>any_preference_active</code>, MAX-reduced across ranks in <code>training/video_pairwise.py</code>). Pairwise is wired only into the Hunyuan backend and requires VQ-only fixed-normalized scores.</p>
+
+<h3 id="s5-artloss">art.py: frozen targets and the trust-region mask</h3>
+<p><code>art_loss</code> takes the current prediction for a batch of items and everything else frozen. The first half builds the frozen target.</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/art.py · L62–93</span> target construction</figcaption>
+  <pre><code class="language-python">    v = current_velocity.float()
+    old = old_velocity.detach().to(v)
+    s = vector(sigma, v, "sigma").float()
+    magnitude = vector(guidance_magnitude, v, "guidance_magnitude").float()
+    if not torch.isfinite(s).all() or ((s &lt; 0) | (s &gt; 1)).any():
+        raise ValueError("sigma must be finite in [0, 1]")
+    if not torch.isfinite(magnitude).all() or (magnitude &lt; 0).any():
+        raise ValueError("guidance_magnitude must be finite and nonnegative")
+    raw = guidance_direction.detach().to(v)
+    raw_rms = raw.square().flatten(1).mean(1).sqrt()
+    direction = raw / expand(raw_rms.clamp_min(eps), v) if direction_normalization == "rms" else raw
+    displacement = expand(magnitude, v) * direction
+    weight = s if loss_space == "velocity_linear_sigma" else torch.ones_like(s)
+    if loss_space == "x0":
+        if state is None:
+            raise ValueError("x0 loss requires state")
+        same_shape(v, state=state)
+        x = state.detach().to(v)
+        if projection:
+            displacement = displacement * expand(
+                (
+                    projection / displacement.square().flatten(1).mean(1).sqrt().clamp_min(eps)
+                ).clamp_max(1),
+                v,
+            )
+        target = (x - expand(s, v) * old + displacement).detach()
+        residual = target - (x - expand(s, v) * v)
+        desired_step = -expand(s, v) * residual.detach()
+    else:
+        target = (old - displacement).detach()
+        residual = target - v
+        desired_step = residual.detach()</code></pre>
+</figure>
+<p>With the paper's recipe (<code>loss_space="velocity_linear_sigma"</code>) only the <code>else</code> branch at L90–93 runs. Substitute the sign convention ($\tilde v=-v$):</p>
+<div class="math-block">\[
+\texttt{target} = \tilde v^{(0)}_\theta - G = -\bigl(v^{(0)}_\theta + G(c)\bigr) = -v^{\text{ART}}_{\text{tgt}},\qquad
+\texttt{residual} = \texttt{target}-\tilde v_\theta = v_\theta - v^{\text{ART}}_{\text{tgt}},\qquad
+\lVert\texttt{residual}\rVert^2=\lVert v_\theta-v^{\text{ART}}_{\text{tgt}}\rVert^2 .
+\]</div>
+<p>So <code>unmasked = weight * mean(residual**2)</code> (first line of the next quote) is exactly $w\,\operatorname{MSE}(v_\theta, v^{\text{ART}}_{\text{tgt}})$ with $w=t$ before masking. Mapping of the rest: <code>v</code> $=\tilde v_\theta(s_t)$ (graph-connected), <code>old</code> $=\tilde v_\theta^{(0)}(s_t)$, <code>s</code> $=t$, <code>raw</code>/<code>direction</code> $=G(c)$, <code>magnitude</code> $=1$, <code>displacement</code> $=G(c)$, <code>weight</code> $=t$. The <code>x0</code> loss space is an alternative that regresses $\hat x_0 = x_t - t\tilde v$ onto $\hat x_0^{(0)} + G$; it is not used by the paper recipes.</p>
+<p>The second half implements the mask of Equation (art_trust_mask):</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/algorithms/art.py · L94–136</span> drift energy, outward alignment, keep mask</figcaption>
+  <pre><code class="language-python">    unmasked = weight * residual.square().flatten(1).mean(1)
+    movement = v - old
+    energy = movement.square().flatten(1).mean(1)
+    alignment = (movement * desired_step).flatten(1).mean(1)
+    if mask_space == "ode_mean" or velocity_mask_metric in (
+        "q2_sde_kl",
+        "scheduler_reference_metric",
+    ):
+        if ode_velocity_coefficient is None:
+            raise ValueError("this mask requires ode_velocity_coefficient")
+        dt = vector(ode_velocity_coefficient, v, "ode_velocity_coefficient").float()
+        if not torch.isfinite(dt).all() or (dt &gt;= 0).any():
+            raise ValueError("ODE coefficients must be finite and negative")
+        if mask_space == "ode_mean":
+            if current_ode_mean is None or old_ode_mean is None:
+                raise ValueError("ode_mean masking requires current and old ODE means")
+            same_shape(v, current_ode_mean=current_ode_mean, old_ode_mean=old_ode_mean)
+            mean_movement = current_ode_mean.float() - old_ode_mean.detach().to(v)
+            energy = mean_movement.square().flatten(1).mean(1)
+            alignment = (mean_movement * expand(dt, v) * desired_step).flatten(1).mean(1)
+        else:
+            initial = torch.isclose(s, torch.ones_like(s), atol=eps, rtol=0)
+            std = torch.where(
+                initial,
+                torch.full_like(s, noise),
+                (noise**2 * s / (1 - s).clamp_min(eps) * (-dt)).clamp_min(0).sqrt(),
+            )
+            coefficient = torch.where(initial, dt, dt * (1 + 0.5 * noise**2))
+            energy = coefficient.square() * energy / (2 * std.square().clamp_min(eps**2))
+            threshold = kl_threshold
+    elif velocity_mask_metric == "noise_normalized_v":
+        energy = torch.where(s &gt; 0, energy / torch.where(s &gt; 0, s, 1.0), 0.0)
+        threshold = radius**2
+    active = (magnitude &gt; 0) &amp; (raw_rms &gt; 0) &amp; (s &gt; 0)
+    requested_anchor = (
+        torch.zeros_like(active)
+        if restore_anchor_mask is None
+        else vector(restore_anchor_mask, v, "restore_anchor_mask").bool()
+    )
+    anchor = requested_anchor &amp; ~active &amp; (s &gt; 0)
+    masked = (active &amp; corrective_mask_enabled &amp; (energy &gt;= threshold) &amp; (alignment &gt; 0)).detach()
+    keep = (anchor | (active &amp; ~masked)).detach()
+    policy = torch.where(keep, unmasked, torch.zeros_like(unmasked))</code></pre>
+</figure>
+<p>Mapping, again with $\tilde v=-v$ and <code>dt</code> $=-h$:</p>
+<ul>
+  <li><code>movement = v - old</code> $= -d(s_t)$, the drift since the rollout; <code>desired_step = residual</code> $= -(G-d)$. Hence <code>alignment</code> $=\tfrac1D\langle -d, -(G-d)\rangle = \tfrac1D\langle d, G-d\rangle$, the paper's outwardness test.</li>
+  <li>For the default <code>velocity_mask_metric="scheduler_reference_metric"</code> (identical to <code>"q2_sde_kl"</code>), L115–122 compute <code>std</code>$^2 = \nu^2\tfrac{t}{1-t}h = \sigma^2_{\text{ref}}(t)$ and <code>coefficient</code> $= -h(1+\nu^2/2)$, so
+  <div class="math-block">\[ \texttt{energy} = \frac{h^2(1+\nu^2/2)^2\,\tfrac1D\lVert d\rVert^2}{2\,\sigma^2_{\text{ref}}(t)} = \frac{\lVert \mu(s_t,v_\theta)-\mu(s_t,v^{(0)}_\theta)\rVert^2}{2D\sigma^2_{\text{ref}}(t)} = m(s_t), \]</div>
+  the per-coordinate KL proxy. At $t=1$ (<code>initial</code>) the endpoint convention $\sigma_{\text{ref}}^2=\nu^2$, coefficient $-h$ is used, as in the paper's appendix. <code>noise</code> $=\nu=0.8$, <code>threshold</code> $=\delta=10^{-5}$.</li>
+  <li><code>masked</code> $=\mathbf 1\{m\ge\delta\}\,\mathbf 1\{\langle d,G-d\rangle&gt;0\}$, and the final weight is $t\,[1-\text{masked}]$, which is the paper's $w(s_t)$.</li>
+</ul>
+<h4>Details the code adds</h4>
+<ul>
+  <li><strong>The mask cannot fire on update 1.</strong> At update 1, <code>movement</code> is zero, so <code>energy</code> is zero (the trace printed $2.5\times10^{-16}$). The mask is effectively a second-update mechanism, exactly as the paper's diagnostics section says.</li>
+  <li><strong>Activity and anchors.</strong> Rows with zero guidance (<code>active</code> false) are dropped from the loss unless flagged as restore anchors. Dropped rows <em>stay in the denominator</em>: the caller divides by the original item count. Video recipes set <code>restore_zero_signal: true</code>, so constant-reward prompts become anchors that train toward $v^{(0)}$; image recipes set it false.</li>
+  <li><strong>Everything frozen is detached</strong>, including the mask (<code>.detach()</code> on L134–135), so the mask is a constant during backpropagation, as the appendix specifies.</li>
+  <li><strong>Optional reference MSE</strong> (<code>reference_prediction</code>, <code>reference_mse_beta</code>) exists for a KL-like regularizer; paper recipes use none.</li>
+</ul>
+
+<h3 id="s5-objectives">objectives.py and update.py: two disjoint updates</h3>
+<p>The kernel is connected to a model by <code>ARTObjective</code>, a callable that maps a list of <code>(row, slot)</code> items to a per-item loss vector:</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/training/objectives.py · L16–27</span> disjoint_windows: split trajectories, keep all their timesteps together</figcaption>
+  <pre><code class="language-python">def disjoint_windows(rows: int, selected_count: int, updates: int = 2):
+    if any(type(x) is not int or x &lt;= 0 for x in (rows, selected_count, updates)) or rows % updates:
+        raise ValueError("positive row count must divide evenly into update windows")
+    size = rows // updates
+    return tuple(
+        tuple(
+            (row, slot)
+            for row in range(window * size, (window + 1) * size)
+            for slot in range(selected_count)
+        )
+        for window in range(updates)
+    )</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/training/objectives.py · L114–144</span> ARTObjective.__call__: gather cached state and old velocity, run the current model, call art_loss</figcaption>
+  <pre><code class="language-python">    def __call__(self, items):
+        rows, slots, steps = _indices(items, self.cache)
+        state = self.cache.states[rows, slots].to(self.device)
+        sigma = self.cache.sigmas[steps].to(self.device)
+        velocity = self.predict(state, sigma, rows.to(self.device))
+        old = self.cache.old_velocities[rows, slots].to(self.device)
+        dt = (self.cache.sigmas[steps + 1] - self.cache.sigmas[steps]).to(self.device)
+        shape = (-1,) + (1,) * (state.ndim - 1)
+        current_mean = state + dt.reshape(shape) * (velocity.float() if self.reconstruct_from_mean else velocity)
+        old_mean = state + dt.reshape(shape) * old
+        if self.reconstruct_from_mean or self.reconstruct_old_from_mean:
+            if (dt.abs() &lt; 1e-8).any():
+                raise ValueError("ART mean reconstruction requires non-degenerate ODE steps")
+            old_mean = self.cache.old_means[rows, slots].to(self.device)
+            if self.reconstruct_from_mean:
+                velocity = (current_mean - state) / dt.reshape(shape)
+            old = (old_mean - state) / dt.reshape(shape)
+        terms = art_loss(
+            velocity,
+            old,
+            sigma,
+            self.row_directions[rows].to(self.device),
+            self.row_magnitudes[rows].to(self.device),
+            state=state,
+            ode_velocity_coefficient=dt,
+            current_ode_mean=current_mean,
+            old_ode_mean=old_mean,
+            restore_anchor_mask=self.row_anchors[rows].to(self.device),
+            **self.options,
+        )
+        return terms["per_item_loss"]</code></pre>
+</figure>
+<p>Mapping: <code>items</code> is a set of states $s_t\in B$; <code>state</code>, <code>sigma</code>, <code>old</code> are read from the rollout cache; <code>velocity = self.predict(...)</code> is the only graph-connected tensor; <code>dt</code> is $-h$ for the cached step; <code>self.row_directions[rows]</code> broadcasts the prompt's $G(c)$ to each of its states. The two flags matter for FLUX and Hunyuan: Hunyuan reconstructs the old velocity from the cached transition mean, <code>old = (old_mean - state)/dt</code>, because the next state is rounded to bf16 in its sampler.</p>
+<p><code>disjoint_windows(rows, S, updates=2)</code> splits <em>trajectories</em> into two contiguous halves and puts all $S$ cached timesteps of a trajectory in the same window. In the paper's notation, $B_1$ and $B_2$ are disjoint sets of trajectories. How rows are ordered before the split differs by backend:</p>
+<ul>
+  <li><strong>Tensor fixture and Hunyuan</strong> use the rows in prompt-major order. With several prompts per rank, window 1 holds the first half of the prompts and window 2 the second half. With one prompt per rank (Hunyuan on 32 GPUs), each window holds $K/2$ videos of that prompt.</li>
+  <li><strong>SD3/FLUX</strong> shuffle the rows with a seeded <code>randperm</code> first (<code>_art_update</code>, quoted below), so each window holds a random half of the trajectories. The README recommends splitting <em>within</em> each prompt ($K/2$ per prompt per window) for better prompt coverage and states explicitly that this is "not a guarantee of every configuration's current split implementation".</li>
+</ul>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/backends/sd3.py · L909–941</span> image ART: guidance on complete groups, objective, shuffled disjoint windows</figcaption>
+  <pre><code class="language-python">def _art_update(
+    c, cache, predict, result, groups, p, k, selected, generator, device, *, guidance_scores=None
+):
+    stats = art_scalar_covariance(
+        cache.endpoints,
+        result.scores.weighted if guidance_scores is None else guidance_scores,
+        groups,
+        p,
+        **{"zero_signal_mode": "exact", **c.algorithm.options["covariance"]},
+    )
+    directions = stats["group_directions"][groups]
+    if c.model.name == "flux" and c.training.precision == "bf16":
+        # Historical FLUX casts group directions to the rollout latent dtype
+        # before the loss's second normalization and corrective-mask test.
+        directions = directions.bfloat16()
+    objective = ARTObjective(
+        cache,
+        predict,
+        directions,
+        stats["group_guidance_magnitudes"][groups],
+        torch.full((p * k,), c.algorithm.options["restore_zero_signal"], dtype=torch.bool),
+        device,
+        options=c.algorithm.options["loss"],
+        reconstruct_from_mean=c.model.name == "flux",
+    )
+    # The one-window setting is the explicit restoration ablation.
+    order = torch.randperm(p * k, generator=generator, device=device).cpu().tolist()
+    windows = tuple(
+        tuple((order[row], slot) for row, slot in window)
+        for window in disjoint_windows(p * k, len(selected),
+                                       updates=c.algorithm.options.get("updates_per_rollout", 2))
+    )
+    return objective, windows</code></pre>
+</figure>
+<p>Finally <code>accumulated_step</code> turns a window into exactly one optimizer step, however many physical microbatches it takes:</p>
+<figure class="code">
+  <figcaption><span class="tag">src/visual_rl/training/update.py · L127–137</span> the loss scale is fixed by the full window size, not the microbatch</figcaption>
+  <pre><code class="language-python">    counts = torch.tensor([math.ceil(len(items) / microbatch)] * 2, device=device)
+    total = torch.tensor(float(denominator), dtype=torch.float64, device=device)
+    world = torch.distributed.get_world_size(group) if _distributed() else 1
+    if _distributed():
+        torch.distributed.all_reduce(counts[:1], op=torch.distributed.ReduceOp.MIN, group=group)
+        torch.distributed.all_reduce(counts[1:], op=torch.distributed.ReduceOp.MAX, group=group)
+        torch.distributed.all_reduce(total, group=group)
+    if counts[0] != counts[1] or total.item() &lt;= 0:
+        raise ValueError("ranks need equal microbatch counts and a positive global denominator")
+    scale = world / total.item()
+    optimizer.zero_grad(set_to_none=True)</code></pre>
+</figure>
+<p>Each microbatch then does <code>(losses.sum() * scale).backward()</code> (L181–182) with <code>scale = world / total</code>; DDP averages gradients over <code>world</code> ranks, so the effective gradient is $\nabla \tfrac{1}{N_{\text{global}}}\sum_{s_t} w\,\operatorname{MSE}$, the paper's $\mathcal L(B;\theta)$ with $|B|$ counted over all ranks. After the backward passes it clips the gradient norm to <code>training.grad_clip</code> (1.0 in every recipe; not in Algorithm 1) and calls <code>optimizer.step()</code> (AdamW, weight decay $10^{-4}$ in paper recipes). For fp16 SD3 a <code>GradScaler</code> replays the same window on overflow.</p>
+<div class="callout insight"><p class="callout-title">Key idea</p><p>Microbatch size is a memory knob; the window is an algorithm knob. Halving <code>training.microbatch</code> produces bit-for-bit the same gradient (up to float summation order). Halving the window (more updates per rollout) changes the algorithm: it creates more chances for drift and restoration per rollout, which is precisely the dynamics the two-update design controls.</p></div>
+
+<h3 id="s5-minimal">A standalone re-implementation, checked against the repo</h3>
+<p>To make sure the reading above is complete, here is the whole ART iteration in 70 lines of plain PyTorch, written in the paper's convention ($v=x_0-\epsilon$, Euler $x_{t-h}=x_t+hv$). It flips the sign of the network output once, at the top, and never again. It omits only the robustness machinery (anchors, exact-zero handling beyond a constant check, the MAD pre-division).</p>
+<figure class="code">
+  <figcaption><span class="tag">toy · runs on CPU · tutorial/scratch/step5/art_minimal.py</span> rollout, guidance, frozen targets, mask, two disjoint updates</figcaption>
+  <pre><code class="language-python">"""Minimal DiffusionART iteration in plain PyTorch, written in the paper's sign convention.
+
+The network outputs the repo/SD3-style velocity eps - x0; we flip it once so that
+v = x0 - eps points along denoising and the Euler step is x_{t-h} = x_t + h v.
+"""
+import torch
+
+def rms(x):  # per-row root-mean-square over all feature axes
+    return x.flatten(1).square().mean(1).sqrt()
+
+def v_paper(net, x, t, c):  # paper velocity = -(repo velocity)
+    return -net(x, t, c)
+
+@torch.no_grad()
+def ode_rollout(net, noise, sigmas, cond):
+    """Euler ODE from t=1 to t=0; cache every visited state and its old velocity."""
+    x, states, v_old = noise.clone(), [], []
+    for i in range(len(sigmas) - 1):
+        t = sigmas[i].expand(len(x))
+        v = v_paper(net, x, t, cond)
+        states.append(x.clone()); v_old.append(v.clone())
+        x = x + (sigmas[i] - sigmas[i + 1]) * v           # h = t - t_next &gt; 0
+    return x, torch.stack(states, 1), torch.stack(v_old, 1)  # x0, [N,S,D], [N,S,D]
+
+@torch.no_grad()
+def guidance(x0, R, groups, eps=1e-5):
+    """G(c) = Cov(R, x0 | c) / rms(Cov), one shared direction per prompt group."""
+    G = torch.zeros(int(groups.max()) + 1, x0.shape[1])
+    for g in groups.unique():
+        r, x = R[groups == g], x0[groups == g]
+        cov = ((r - r.mean())[:, None] * (x - x.mean(0))).sum(0) / (len(r) - 1)
+        G[g] = cov / rms(cov[None]).clamp_min(eps) if (r != r[0]).any() else 0.0
+    return G[groups]                                       # [N, D], row-aligned
+
+def art_window_loss(net, states, v_old, sigmas, cond, G, rows, nu=0.8, delta=1e-5):
+    """Masked, t-weighted MSE to the frozen target v_old + G over one window."""
+    S = states.shape[1]
+    t, t_next = sigmas[:S], sigmas[1:S + 1]
+    h = (t - t_next)[None].expand(len(rows), S).reshape(-1)
+    tt = t[None].expand(len(rows), S).reshape(-1)
+    x = states[rows].reshape(-1, states.shape[-1])
+    vo = v_old[rows].reshape(-1, states.shape[-1])
+    g = G[rows][:, None].expand(-1, S, -1).reshape(-1, states.shape[-1])
+    v = v_paper(net, x, tt, cond[rows].repeat_interleave(S))
+    target = (vo + g).detach()                             # frozen ART target
+    d = (v - vo).detach()                                  # drift from rollout policy
+    # Flow-GRPO reference SDE step: mean gap = h(1+nu^2/2) d, var = nu^2 t/(1-t) h
+    first = torch.isclose(tt, torch.ones_like(tt))
+    var = torch.where(first, torch.full_like(tt, nu**2), nu**2 * tt / (1 - tt).clamp_min(1e-5) * h)
+    coef = torch.where(first, h, h * (1 + nu**2 / 2))
+    m = coef**2 * d.square().mean(1) / (2 * var)           # KL proxy per output dim
+    outward = (d * (g - d)).mean(1) &gt; 0
+    w = tt * (~((m &gt;= delta) &amp; outward)).float()           # w = t [1 - 1{m&gt;=delta} 1{outward}]
+    w = w * (rms(g) &gt; 0)                                   # zero-signal prompts: no loss
+    per_item = w * (v - target).square().mean(1)
+    return per_item.sum() / len(per_item), (w == 0).float().mean()
+
+def art_iteration(net, opt, noise, sigmas, cond, groups, reward_fn, clip=1.0):
+    x0, states, v_old = ode_rollout(net, noise, sigmas, cond)
+    R = reward_fn(x0)
+    G = guidance(x0, R, groups)
+    n = len(x0)
+    log = []
+    for rows in (torch.arange(0, n // 2), torch.arange(n // 2, n)):   # B1, B2 disjoint
+        loss, masked = art_window_loss(net, states, v_old, sigmas, cond, G, rows)
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), clip)        # repo adds this
+        opt.step()
+        log.append((loss.item(), masked.item()))
+    return R, G, log</code></pre>
+</figure>
+<p><code>check_against_repo.py</code> runs this function and the repo pipeline (<code>collect_rollout</code> → <code>art_scalar_covariance</code> → <code>ARTObjective</code> → <code>disjoint_windows</code> → <code>accumulated_step</code>, with deliberately different microbatch sizes of 5 and 7) from the same initial weights and noise, inside the repo's <code>uv</code> environment. $P=3$, $K=4$, 6 steps, AdamW with learning rate $10^{-2}$:</p>
+<figure class="code">
+  <figcaption><span class="tag">real output · tutorial/scratch/step5/check_against_repo.py</span> minimal version vs repo kernels</figcaption>
+  <pre><code class="language-text">lr=0.01  P=3 K=4 steps=6  windows of 36 (row, t) items
+rewards        max |diff| : 0.0
+guidance G     max |diff| : 2.980232238769531e-07
+rms(G) per prompt         : [1.0, 1.0, 1.0]
+update 1: loss mini=0.583333 repo=0.583333 | masked frac mini=0.000 repo=0.000
+update 2: loss mini=0.208633 repo=0.208633 | masked frac mini=0.667 repo=0.667
+params after 2 updates max |diff| : 2.9802322387695312e-08</code></pre>
+</figure>
+<p>Guidance agrees to fp32 rounding ($3\times10^{-7}$), both losses agree to six digits, the mask fires on the same 2/3 of the update-2 items, and the parameters after both updates agree to $3\times10^{-8}$. Update 1's loss is $\tfrac16(1+\tfrac56+\tfrac46+\tfrac36+\tfrac26+\tfrac16)=0.5833$, the mean of $t$ over the six trained states, as predicted. The large learning rate here was chosen so the mask visibly fires; with $10^{-3}$ the same script gives a masked fraction of 0.083 in both implementations.</p>
+
+<h3 id="s5-baselines">The baselines in the same framework</h3>
+<p>All six baselines from the paper run through the same CLI and backends; only <code>algorithm.name</code> and its options change. This is what makes the repo useful for fair comparisons: the prompt stream, the decode, the reward code, evaluation cadence and the GPU-hour clocks (<code>training/state.py</code>, <code>CostClock</code>) are shared.</p>
+<div class="table-wrap"><table>
+<thead><tr><th><code>algorithm.name</code></th><th>Kernel</th><th>Rollout / update plumbing</th><th>Updates per rollout</th></tr></thead>
+<tbody>
+<tr><td><code>diffusionart</code></td><td><code>algorithms/covariance.py</code>, <code>art.py</code></td><td><code>training/rollout.py</code>, <code>ARTObjective</code>; pairwise: <code>video_pairwise.py</code></td><td>2 (<code>updates_per_rollout: 1</code> is the ablation)</td></tr>
+<tr><td><code>diffusionnft</code></td><td><code>algorithms/nft.py</code> (<code>nft_loss</code>, <code>old_policy_decay</code>)</td><td><code>training/nft.py</code>, <code>nft_sampling.py</code> (DPM2 endpoints), <code>endpoint_renoising</code>, <code>NFTObjective</code>; video: <code>video_nft.py</code></td><td>1 (all items); EMA old policy via <code>PolicyShadow</code> / <code>fsdp_shadow.py</code></td></tr>
+<tr><td><code>flow_grpo</code>, <code>flow_grpo_fast</code></td><td><code>algorithms/policy.py</code> (<code>clipped_grpo_loss</code>)</td><td><code>training/grpo.py</code>, <code>grpo_sampling.py</code>; video Fast: <code>video_grpo.py</code></td><td>2 in paper recipes</td></tr>
+<tr><td><code>flow_dppo</code></td><td><code>flowdppo_loss</code> (KL-advantage mask, no ratio clip)</td><td><code>training/grpo.py</code></td><td>2</td></tr>
+<tr><td><code>dancegrpo</code></td><td><code>clipped_grpo_loss</code> with per-component clipping</td><td><code>grpo.py</code> (image), <code>dance_video.py</code> (video)</td><td>2</td></tr>
+<tr><td><code>refl</code></td><td><code>algorithms/refl.py</code></td><td><code>video_refl.py</code>, <code>refl_vjp.py</code> (staged VAE/reward VJPs)</td><td>1, $K=1$</td></tr>
+</tbody></table></div>
+<p>The tensor fixture runs all of them except ReFL with the default smoke config (ReFL needs $K=1$). Changing one line of <code>cpu_smoke.yaml</code> gives, for Flow-GRPO-Fast and for DiffusionNFT, these real <code>metrics.jsonl</code> rows (rounded):</p>
+<figure class="code">
+  <figcaption><span class="tag">real output · cpu_smoke.yaml with algorithm swapped</span> train/ metrics per optimizer step</figcaption>
+  <pre><code class="language-text">== flow_grpo_fast
+{'grad_norm/before_clip': 0.3092, 'loss': -0.0, 'optimizer_step': 1, 'reward/quadratic': -1.2997}
+{'grad_norm/before_clip': 0.0, 'loss': -0.0, 'optimizer_step': 2, 'reward/quadratic': -1.2997}
+{'grad_norm/before_clip': 0.2255, 'loss': 0.0, 'optimizer_step': 3, 'reward/quadratic': -1.0033}
+{'grad_norm/before_clip': 0.0023, 'loss': -0.0, 'optimizer_step': 4, 'reward/quadratic': -1.0033}
+== diffusionnft
+{'grad_norm/before_clip': 0.434, 'loss': 6.1583, 'optimizer_step': 1, 'reward/quadratic': -1.3722}
+{'grad_norm/before_clip': 0.5503, 'loss': 7.1867, 'optimizer_step': 2, 'reward/quadratic': -1.5883}
+{'grad_norm/before_clip': 0.6105, 'loss': 6.3343, 'optimizer_step': 3, 'reward/quadratic': -1.5537}
+{'grad_norm/before_clip': 0.6169, 'loss': 5.2578, 'optimizer_step': 4, 'reward/quadratic': -1.3122}</code></pre>
+</figure>
+<p>Two things are visible even in a toy. Flow-GRPO-Fast's loss is $\approx 0$ because at ratio 1 the PPO surrogate equals $-\bar A = 0$ for group-centered advantages; and its second update has a gradient norm of 0.0 or nearly so, because <code>ratio_clip</code> is $10^{-5}$ in these recipes: after one step almost every ratio has left $[1-10^{-5}, 1+10^{-5}]$ on the side where the clip zeroes the gradient. DiffusionNFT performs one update per rollout and therefore needs four rollouts for four steps (<code>attempts: 4</code> in its status), versus two for ART.</p>
+<h4>Checklist for a fair comparison</h4>
+<ul>
+  <li>Start from the paper recipes in <code>configs/paper/image/</code> or <code>configs/paper/video/</code>, which pin $P$, $K$, steps, learning rate, LoRA rank and evaluation cadence per method. The <code>configs/examples/</code> files are four-update integration checks (the SD3 example even uses CFG 7, which the paper does not).</li>
+  <li>Compare on <code>cost/training_gpu_hours</code> as well as <code>train/optimizer_step</code>; methods differ in rollouts per optimizer step (NFT and ReFL: 1 update per rollout, the rest: 2).</li>
+  <li>Keep $P$, $K$ and the number of decoded samples per update fixed when the question is "which objective", and vary them only when the question is sample efficiency.</li>
+  <li>NFT has two recipes per benchmark: <code>*_nft_ema</code> (the tuned EMA schedule) and <code>*_nft_onpolicy</code> (<code>old_policy: {rate: 0, maximum: 0}</code>). The paper's stability claim is about the second.</li>
+</ul>
+
+<h3 id="s5-config">The config system</h3>
+<p>Configs are YAML with three features: <code>extends:</code> (a path or list, merged left to right, child last), environment-variable references (a dollar sign followed by <code>{NAME}</code>, as in the paper recipes' model paths) that fail loudly when the variable is unset, and strict schemas (unknown keys and duplicate keys are rejected). Changing <code>algorithm.name</code>, <code>model.name</code> or <code>reward.name</code> in a child <em>replaces</em> that whole section, so options of the parent algorithm never leak into another algorithm (<code>config.py</code> L40–60). <code>reward.weights</code> is always replaced, never merged.</p>
+<h4>cpu_smoke.yaml, field by field</h4>
+<figure class="code">
+  <figcaption><span class="tag">configs/examples/cpu_smoke.yaml</span> the whole file</figcaption>
+  <pre><code class="language-yaml"># Software integration test only. This is not an image-generation experiment.
+schema_version: 1
+name: cpu-smoke
+task: t2i
+seed: 42
+algorithm: diffusionart
+model: tensor_fixture
+reward:
+  name: quadratic
+  weights: {quadratic: 1.0}
+  normalization: raw
+sampling:
+  steps: 4
+  prompts_per_rollout: 2
+  samples_per_prompt: 4
+  microbatch: 4
+  frames: 1
+  height: 8
+  width: 8
+training:
+  max_updates: 4
+  learning_rate: 0.001
+  microbatch: 3
+  precision: fp32
+evaluation:
+  every_updates: 0
+runtime:
+  device: cpu
+  output_dir: outputs/cpu-smoke
+  checkpoint_every: 2</code></pre>
+</figure>
+<div class="table-wrap"><table>
+<thead><tr><th>Field</th><th>Meaning</th><th>Effect in the fixture</th></tr></thead>
+<tbody>
+<tr><td><code>schema_version</code>, <code>name</code>, <code>seed</code></td><td>schema guard, run name, global seed</td><td>seed 42 drives model init and the sampling generator</td></tr>
+<tr><td><code>task: t2i</code></td><td>t2i, t2v or i2v; checked against the backend</td><td>fixture only accepts t2i</td></tr>
+<tr><td><code>algorithm: diffusionart</code></td><td>shorthand for <code>{name: diffusionart, options: {}}</code></td><td>fixture rejects any options and uses the kernel defaults</td></tr>
+<tr><td><code>model: tensor_fixture</code></td><td>selects the backend through the registry</td><td>tiny MLP velocity field</td></tr>
+<tr><td><code>reward.name/weights</code></td><td>scorer and per-component weights</td><td>quadratic reward, weight 1</td></tr>
+<tr><td><code>reward.normalization: raw</code></td><td><code>raw</code> or <code>fixed</code> (e.g. PickScore/26) for the training signal</td><td>raw</td></tr>
+<tr><td><code>sampling.steps</code></td><td>Euler steps per rollout</td><td>4, trained on the first 3</td></tr>
+<tr><td><code>sampling.prompts_per_rollout</code></td><td>$P$, global across ranks</td><td>2 prompt groups</td></tr>
+<tr><td><code>sampling.samples_per_prompt</code></td><td>$K$</td><td>4; must be even for two windows</td></tr>
+<tr><td><code>sampling.microbatch</code></td><td>physical rollout batch</td><td>4; does not change the cache</td></tr>
+<tr><td><code>frames/height/width</code></td><td>media geometry</td><td>ignored by the 4-D fixture</td></tr>
+<tr><td><code>training.max_updates</code></td><td>total optimizer steps (not rollouts)</td><td>4 = 2 rollouts × 2 windows</td></tr>
+<tr><td><code>training.learning_rate</code></td><td>AdamW lr</td><td>$10^{-3}$; defaults: betas (0.9, 0.999), eps $10^{-8}$, wd 0, grad_clip 1.0</td></tr>
+<tr><td><code>training.microbatch</code></td><td>physical update batch, items per backward</td><td>3, giving 4 backward calls per 12-item window</td></tr>
+<tr><td><code>training.precision</code></td><td>fp32, bf16 or fp16, per backend</td><td>fp32 only</td></tr>
+<tr><td><code>evaluation.every_updates: 0</code></td><td>disable periodic evaluation</td><td>the fixture has no media evaluation</td></tr>
+<tr><td><code>runtime.device/output_dir</code></td><td>device and run directory</td><td>refuses to overwrite an existing directory</td></tr>
+<tr><td><code>runtime.checkpoint_every</code></td><td>save every N optimizer steps</td><td>checkpoints at steps 2 and 4</td></tr>
+</tbody></table></div>
+<h4>A real image recipe: SD3.5-M on PickScore</h4>
+<p><code>configs/paper/image/sd3_pickscore_art.yaml</code> extends the SD3 example (which supplies the LoRA setup: rank 32, alpha 64, attention projections) and the PickScore asset file. Its algorithm block spells out every kernel option, which is a good way to see the defaults:</p>
+<figure class="code">
+  <figcaption><span class="tag">configs/paper/image/sd3_pickscore_art.yaml · L1–25</span> algorithm options: covariance and loss</figcaption>
+  <pre><code class="language-yaml"># Full-budget training candidate; not certified historical reproduction.
+extends:
+  - ../../examples/sd3_pickscore.yaml
+  - ../pickscore-assets.yaml
+name: paper-sd3_pickscore_art-candidate
+seed: 42
+algorithm:
+  name: diffusionart
+  options:
+    restore_zero_signal: false
+    covariance:
+      reduction: unbiased
+      direction_mode: historical
+      scale_mode: unit_normalized_covariance
+      guidance_gain: 1
+      zero_signal_mode: exact
+    loss:
+      loss_space: velocity_linear_sigma
+      direction_normalization: rms
+      mask_space: velocity
+      velocity_mask_metric: scheduler_reference_metric
+      corrective_mask_enabled: true
+      q2_reference_sde_noise_level: 0.8
+      q2_reference_kl_threshold: 1.0e-05
+model:</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">configs/paper/image/sd3_pickscore_art.yaml · L45–78</span> sampling and training</figcaption>
+  <pre><code class="language-yaml">sampling:
+  steps: 10
+  prompts_per_rollout: 64
+  samples_per_prompt: 18
+  microbatch: 9
+  guidance_scale: 1
+  height: 512
+  width: 512
+  options:
+    shift: 3
+    train_timesteps:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+training:
+  max_updates: 1000
+  learning_rate: 0.0003
+  microbatch: 9
+  precision: fp16
+  allow_tf32: true
+  grad_clip: 1
+  optimizer: adamw
+  weight_decay: 0.0001
+  betas:
+  - 0.9
+  - 0.999
+  epsilon: 1.0e-08</code></pre>
+</figure>
+<p>So one SD3 iteration on 8 GPUs is $P=64$ prompts × $K=18$ images = 1152 rollouts, 10 Euler steps without CFG, all 10 states trained, two windows of 576 trajectories (5760 items) each, fp16 forward with a gradient scaler, lr $3\times10^{-4}$ on LoRA, 1000 optimizer updates (500 rollouts), evaluation every 50 updates at 40 sampling steps.</p>
+<h4>A real video recipe: HunyuanVideo, TA:VQ:MQ = 7:2:1</h4>
+<figure class="code">
+  <figcaption><span class="tag">configs/paper/video/hunyuan_art_721.yaml · L1–30</span> the paper recipe overrides the integration example</figcaption>
+  <pre><code class="language-yaml"># Full-budget training profile; evaluation is corrected common evaluation.
+extends: [../../examples/hunyuan_art.yaml, ../hunyuan-assets.yaml]
+name: paper-hunyuan-art-721
+algorithm:
+  options:
+    restore_zero_signal: true
+model:
+  revision: e8c2aaa66fe3742a32c11a6766aecbf07c56e773
+  options:
+    allow_tf32: true
+reward:
+  revision: 4f26600130683e6f1de9f5d463887f28e8ef995c
+sampling:
+  microbatch: 8
+training:
+  max_updates: 400
+  learning_rate: 0.00001
+  microbatch: 8
+  optimizer: adamw
+  betas: [0.9, 0.999]
+  epsilon: 0.00000001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  precision: bf16
+evaluation:
+  every_updates: 50
+  shift: 7.0
+runtime:
+  log: wandb
+  output_dir: ${PAPER_VIDEO_OUTPUT_ROOT}/hunyuan-art-721</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">configs/examples/hunyuan_art.yaml · L40–60</span> inherited reward weights and sampling</figcaption>
+  <pre><code class="language-yaml">  weights: {VQ: 0.2, MQ: 0.1, TA: 0.7}
+  options:
+    backbone: ${VIDEO_REWARD_BACKBONE}
+data:
+  manifest: ${HUNYUAN_TRAIN_MANIFEST}
+  sha256: ${HUNYUAN_TRAIN_SHA256}
+  shuffle: true
+sampling:
+  steps: 16
+  prompts_per_rollout: 32
+  samples_per_prompt: 8
+  microbatch: 1
+  guidance_scale: 1.0
+  height: 480
+  width: 480
+  frames: 53
+  fps: 8.0
+  options:
+    shift: 5.0
+    train_timestep_count: 9
+    train_timestep_pool: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]</code></pre>
+</figure>
+<p>The model is trained in full (<code>finetune: {mode: full}</code>, FP32 master weights, BF16 autocast, FSDP FULL_SHARD), $P=32$ global prompts × $K=8$ videos of 53 frames at 480×480, 16 steps with shift 5, 9 random training states per video, lr $10^{-5}$, 400 updates. <code>restore_zero_signal: true</code> turns constant-reward prompts into restoration anchors.</p>
+<div class="callout warn"><p class="callout-title">Pitfall: the 2026-10-14 microbatch fix</p><p>The README changelog records that Hunyuan paper recipes once inherited <code>microbatch: 1</code> from the example for both rollout and update, instead of 8 (ReFL stays 1/1). That is why the paper recipe sets <code>sampling.microbatch: 8</code> and <code>training.microbatch: 8</code> explicitly (lines 13–18 above). With 8 videos and 16 steps per rank, microbatch 1 means 128 batch-1 transformer calls per rollout instead of 16 batch-8 calls, and 36 instead of 5 backward calls per window. The math is identical (the denominator is the window size), but GPU-hours, the paper's main metric, are not. Use a checkout that contains commit <code>0fb23a7</code> or later.</p></div>
+<h4>The knobs that matter</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>Knob</th><th>Config path</th><th>What it changes</th></tr></thead>
+<tbody>
+<tr><td>$K$</td><td><code>sampling.samples_per_prompt</code></td><td>covariance estimator noise and rollout cost; the guidance <em>scale</em> is independent of $K$ (Exercise 5.1). Paper: pairwise $K=2$ matches $K=8$ with 3.4× fewer GPU-hours.</td></tr>
+<tr><td>$P$</td><td><code>sampling.prompts_per_rollout</code></td><td>prompt coverage per update; the README recommends more prompts when compute allows. Global; must divide the world size.</td></tr>
+<tr><td>Rollout steps and trained states</td><td><code>sampling.steps</code>, <code>options.train_timesteps</code> / <code>train_timestep_count</code></td><td>cache size, compute per update, and which noise levels receive guidance</td></tr>
+<tr><td>Microbatches</td><td><code>sampling.microbatch</code>, <code>training.microbatch</code></td><td>memory and throughput only</td></tr>
+<tr><td>Updates per rollout</td><td><code>algorithm.options.updates_per_rollout</code> (image)</td><td>1 removes restoration (paper's OCR ablation)</td></tr>
+<tr><td>Learning rate, LoRA vs full</td><td><code>training.learning_rate</code>, <code>model.options.finetune</code></td><td>image: LoRA r32/α64, lr $3\times10^{-4}$; video: full, lr $10^{-5}$</td></tr>
+<tr><td>Guidance normalization</td><td><code>covariance.direction_mode</code>, <code>scale_mode</code>, <code>guidance_gain</code></td><td><code>unit_normalized_covariance</code> is the paper; <code>raw_covariance</code> makes the step size follow the raw covariance magnitude</td></tr>
+<tr><td>Trust region</td><td><code>loss.corrective_mask_enabled</code>, <code>q2_reference_kl_threshold</code>, <code>q2_reference_sde_noise_level</code></td><td>$\delta$ and $\nu$; paper fixes $10^{-5}$ and 0.8</td></tr>
+<tr><td>Timestep weighting</td><td><code>loss.loss_space</code></td><td><code>velocity_linear_sigma</code> is $w=t$; <code>velocity_uniform</code> drops it</td></tr>
+<tr><td>Zero-signal prompts</td><td><code>restore_zero_signal</code>, <code>covariance.zero_signal_mode</code></td><td>skip vs restore constant-reward groups</td></tr>
+</tbody></table></div>
+
+<h3 id="s5-run-cpu">Running it on a laptop: the CPU smoke test</h3>
+<p>I ran the documented commands on an Apple-silicon Mac. One deviation: to leave the repository untouched I pointed uv's environment at a scratch directory with <code>UV_PROJECT_ENVIRONMENT</code> instead of creating <code>.venv</code> inside the repo. The commands are otherwise exactly the README's.</p>
+<figure class="code">
+  <figcaption><span class="tag">shell</span> install, validate, run</figcaption>
+  <pre><code class="language-bash">cd DiffusionART
+export UV_PROJECT_ENVIRONMENT=/path/to/scratch/venv     # optional; default is ./.venv
+uv sync --locked --python 3.10 --extra diffusers          # resolved from cache in 6.4 s here
+uv run --locked visual-rl --config configs/examples/cpu_smoke.yaml --validate
+uv run --locked visual-rl --config configs/examples/cpu_smoke.yaml</code></pre>
+</figure>
+<p><code>uv sync</code> exited 0 (torch 2.6.0, diffusers, transformers, wandb and the package itself, editable). <code>--validate</code> printed one JSON line and exited 0:</p>
+<figure class="code">
+  <figcaption><span class="tag">real output</span> --validate</figcaption>
+  <pre><code class="language-text">{"valid": true, "name": "cpu-smoke", "config_sha256": "8a6e643a0b0e17fd998b419e5ab2550d850fb5ff0c392abaa6260ac86cb0ebf6", "backend_status": "CPU software fixture; not a paper reproduction"}</code></pre>
+</figure>
+<p>The training run prints nothing to the terminal and exited 0 after about 4.5 s wall time (most of it Python start-up; training itself took 0.037 s). Everything goes to <code>outputs/cpu-smoke/</code>: <code>resolved-config.json</code>, <code>run.json</code>, <code>metrics.jsonl</code>, <code>status.json</code>, an <code>.owner.lock</code>, and <code>checkpoints/</code> with steps 2 and 4 plus <code>latest.json</code>. The README's acceptance criterion is that <code>status.json</code> reports <code>completed</code> and four optimizer steps:</p>
+<figure class="code">
+  <figcaption><span class="tag">real output · outputs/cpu-smoke/status.json</span></figcaption>
+  <pre><code class="language-json">{"attempts": 2, "completed_rollouts": 2, "config_sha256": "8a6e643a0b0e17fd998b419e5ab2550d850fb5ff0c392abaa6260ac86cb0ebf6", "elapsed_seconds": 0.04178916709497571, "kind": "software_fixture_not_paper_result", "optimizer_steps": 4, "status": "completed", "training_seconds": 0.03726804116740823}</code></pre>
+</figure>
+<figure class="code">
+  <figcaption><span class="tag">real output · outputs/cpu-smoke/metrics.jsonl</span> one line per optimizer step</figcaption>
+  <pre><code class="language-json">{"cost/elapsed_gpu_hours": 0.0, "cost/elapsed_seconds": 0.026216417085379362, "cost/gpu_count": 0, "cost/training_gpu_hours": 0.0, "cost/training_seconds": 0.025278749875724316, "system/completed_rollouts": 0, "system/rollout_attempts": 1, "train/grad_clip_triggered": 1.0, "train/grad_norm/before_clip": 1.1816498041152954, "train/loss": 0.7499999950329462, "train/optimizer_step": 1, "train/reward/quadratic": -1.3722093105316162}
+{"cost/elapsed_gpu_hours": 0.0, "cost/elapsed_seconds": 0.029295541811734438, "cost/gpu_count": 0, "cost/training_gpu_hours": 0.0, "cost/training_seconds": 0.02835787460207939, "system/completed_rollouts": 0, "system/rollout_attempts": 1, "train/grad_clip_triggered": 1.0, "train/grad_norm/before_clip": 1.3577007055282593, "train/loss": 0.7081089839339256, "train/optimizer_step": 2, "train/reward/quadratic": -1.3722093105316162}
+{"cost/elapsed_gpu_hours": 0.0, "cost/elapsed_seconds": 0.038436708971858025, "cost/gpu_count": 0, "cost/training_gpu_hours": 0.0, "cost/training_seconds": 0.03391558304429054, "system/completed_rollouts": 1, "system/rollout_attempts": 2, "train/grad_clip_triggered": 1.0, "train/grad_norm/before_clip": 1.2580190896987915, "train/loss": 0.7500000993410746, "train/optimizer_step": 3, "train/reward/quadratic": -1.6047844886779785}
+{"cost/elapsed_gpu_hours": 0.0, "cost/elapsed_seconds": 0.041670375037938356, "cost/gpu_count": 0, "cost/training_gpu_hours": 0.0, "cost/training_seconds": 0.037149249110370874, "system/completed_rollouts": 1, "system/rollout_attempts": 2, "train/grad_clip_triggered": 1.0, "train/grad_norm/before_clip": 1.3066655397415161, "train/loss": 0.7503057072559992, "train/optimizer_step": 4, "train/reward/quadratic": -1.6047844886779785}</code></pre>
+</figure>
+<p>How to read it: <code>attempts: 2, completed_rollouts: 2, optimizer_steps: 4</code> means two rollouts with two updates each. Steps 1 and 3 have loss $\approx 0.75$ (the mean-of-$t$ identity, on two different rollouts); steps 2 and 4 are second updates. The reward is constant within a rollout because it is logged per rollout. Every step triggered the gradient clip (<code>grad_norm/before_clip</code> above 1), which in a toy with lr $10^{-3}$ is harmless. To run again, pass <code>--output-dir outputs/cpu-smoke-2</code>; the runner refuses to overwrite.</p>
+<p>The full test suite is <code>uv sync --locked --python 3.10 --extra dev</code> then <code>uv run --locked --extra dev pytest -q</code>; the two kernel files <code>tests/test_algorithms.py</code> and <code>tests/test_algorithms_optimizer.py</code> are the ones to run after touching <code>algorithms/</code>. I did not run the suite for this chapter.</p>
+
+<h3 id="s5-run-gpu">Running it on GPUs</h3>
+<p>I could not run these here (no CUDA GPUs, no model licenses accepted on this machine). The commands, variables and expectations below are taken from <code>README.md</code>, <code>docs/quickstart.md</code>, <code>docs/paper-image.md</code>, <code>docs/paper-video.md</code>, <code>docs/distributed-execution.md</code> and <code>docs/logging.md</code>. The docs state that pretrained GPU acceptance of the release code is still pending, so treat a first run as a validation exercise.</p>
+<h4>Environment variables</h4>
+<ul>
+  <li><code>HF_TOKEN</code> (or a prior <code>huggingface-cli login</code>) after accepting the SD3.5 license on the Hub; <code>HF_HOME</code> optionally relocates the Hub cache.</li>
+  <li><code>WANDB_API_KEY</code> (or <code>wandb login</code>), <code>WANDB_PROJECT</code>, optionally <code>WANDB_ENTITY</code>; <code>WANDB_MODE=offline</code> records locally. Paper recipes set <code>runtime.log: wandb</code> and check credentials before loading models.</li>
+  <li><code>VISUAL_RL_ASSET_ROOT</code>: writable asset cache (default <code>~/.cache/visual-rl</code>). <code>PAPER_OUTPUT_ROOT</code> (image, default <code>outputs</code>) and <code>PAPER_VIDEO_OUTPUT_ROOT</code> (video).</li>
+  <li>Multi-node: <code>PREPARATION_RUN_ID</code> (a fresh UUID shared by all nodes for one launch), <code>NODE_RANK</code>, <code>MASTER_ADDR</code>; <code>VISUAL_RL_COLLECTIVE_TIMEOUT_SECONDS</code> (default 300) for collectives.</li>
+  <li>Video only: <code>DANCEGRPO_ROOT</code> (native HunyuanVideo source at a pinned commit), installed by <code>scripts/install_video_environment.sh</code>.</li>
+</ul>
+<h4>SD3.5-M PickScore (T2I), one node with 8 GPUs</h4>
+<figure class="code">
+  <figcaption><span class="tag">shell · from README.md and docs/quickstart.md</span> image recipe</figcaption>
+  <pre><code class="language-bash">uv sync --locked --python 3.10 --extra diffusers
+export WANDB_PROJECT=my-diffusion-experiments
+export VISUAL_RL_ASSET_ROOT=/abs/writable/assets
+export PAPER_OUTPUT_ROOT=/abs/writable/outputs
+# network-free check first, then the 1000-update run
+uv run --locked --extra diffusers visual-rl \
+  --config configs/paper/image/sd3_pickscore_art.yaml --validate
+uv run --locked --extra diffusers visual-rl \
+  --config configs/paper/image/sd3_pickscore_art.yaml --nproc-per-node 8
+# resume and extend the budget
+uv run --locked --extra diffusers visual-rl \
+  --config configs/paper/image/sd3_pickscore_art.yaml --nproc-per-node 8 \
+  --resume latest --max-updates 1500</code></pre>
+</figure>
+<p>The parent process downloads pinned SD3.5-M, PickScore and processor snapshots and the PickScore prompt lists (25,432 train, 2,048 eval) from the authors' HF dataset, checks SHA256s, then <code>execv</code>s into <code>torchrun --standalone --nproc-per-node=8</code>. This is replicated DDP: each GPU holds the full SD3.5-M with LoRA and its optimizer; adding GPUs does not reduce per-GPU memory. Each rank owns $64/8=8$ complete prompt groups, so the guidance needs no cross-rank communication. Baselines: swap the file for <code>sd3_pickscore_{grpo,fast,dppo,dance,nft_ema,nft_onpolicy}.yaml</code>. GenEval and OCR need their scorer workers set up first (<code>docs/geneval.md</code>, <code>docs/sd3-ocr.md</code>).</p>
+<h4>HunyuanVideo-13B (T2V), 4 nodes × 8 GPUs</h4>
+<figure class="code">
+  <figcaption><span class="tag">shell · from README.md and docs/video-installation.md</span> video recipe</figcaption>
+  <pre><code class="language-bash"># separate pinned environment (Linux x86_64, CUDA 12.4 toolkit, FFmpeg, FlashAttention build)
+export VENV="$HOME/envs/visual-rl-hunyuan"
+bash scripts/install_video_environment.sh hunyuan "$VENV"
+source "$VENV/bin/activate"
+export DANCEGRPO_ROOT="$VENV/third_party/DanceGRPO"
+export PAPER_VIDEO_OUTPUT_ROOT=/shared/outputs/paper-video
+
+# once per launch, then export the SAME value on every node
+python -c 'import uuid; print(uuid.uuid4().hex)'
+export PREPARATION_RUN_ID=...
+
+visual-rl --config configs/paper/video/hunyuan_art_721.yaml \
+  --nproc-per-node 8 --nnodes 4 --node-rank "$NODE_RANK" \
+  --master-addr "$MASTER_ADDR" --preparation-run-id "$PREPARATION_RUN_ID" \
+  --rendezvous-timeout-seconds 7200</code></pre>
+</figure>
+<p>Hardware: the paper fine-tunes all 13B parameters, and the README launches the recipe on 4 nodes × 8 GPUs; the install guide asks for BF16-capable GPUs with a CUDA 12.4 toolchain and names H200/H800 class devices without requiring a specific SKU. Asset and output roots must be on shared storage visible to every node. The first preparation encodes all training prompts with the Hunyuan text encoder on GPU, which the docs warn can take hours; it is cached afterwards. Each of the 32 ranks gets exactly one prompt group ($32/32$), so the $K=8$ videos of a prompt and their covariance stay on one rank. FSDP notes from <code>docs/hunyuan-runner.md</code>: FULL_SHARD with FP32 master parameters and reductions, BF16 autocast, block-level wrapping, optional activation checkpointing, no CPU offload, no <code>no_sync</code> (every microbatch reduces gradient shards), clipping with FSDP's global norm. Resume requires the same topology and PyTorch version. Baselines: <code>hunyuan_{fast,dance,nft_ema,nft_onpolicy}_721.yaml</code>; pairwise: <code>hunyuan_pairwise_vq_k{2,4,8}.yaml</code> against <code>hunyuan_scalar_vq_k8.yaml</code>.</p>
+<h4>What to watch in W&amp;B</h4>
+<p>The trainer only writes <code>metrics.jsonl</code>; a separate CPU process replays it into W&amp;B with <code>train/optimizer_step</code> as the x-axis. The metric names that exist in the code are:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Metric</th><th>What healthy looks like for ART</th></tr></thead>
+<tbody>
+<tr><td><code>train/reward</code>, <code>train/reward/raw/&lt;name&gt;</code>, <code>train/reward/fixed_normalized/&lt;name&gt;</code></td><td>weighted training reward and its components (e.g. <code>raw/VQ</code>, <code>raw/MQ</code>, <code>raw/TA</code>); rises fastest early; plot against <code>cost/training_gpu_hours</code> too</td></tr>
+<tr><td><code>eval/reward</code>, <code>eval/reward/&lt;space&gt;/&lt;name&gt;</code> on <code>eval/optimizer_step</code></td><td>held-out reward every 50 updates; the paper's tables</td></tr>
+<tr><td><code>train/loss</code></td><td>odd steps (update 1) $\approx$ mean trained $t$ × fraction of active prompts (for SD3's 10-step shift-3 grid, mean $t = 0.658$); even steps lower</td></tr>
+<tr><td><code>train/grad_norm/before_clip</code>, <code>train/grad_clip_triggered</code></td><td>the paper's stability diagnostic; spikes on first updates signal too much drift</td></tr>
+<tr><td><code>system/skipped_zero_guidance</code>, <code>system/rollout_attempts</code>, <code>system/completed_rollouts</code></td><td>skipped rollouts where every prompt had constant reward (e.g. saturated GenEval)</td></tr>
+<tr><td><code>train/pairwise/inactive_rollout</code></td><td>pairwise only: all pairs tied everywhere</td></tr>
+<tr><td><code>train/loss_scale</code>, <code>train/overflow_retries</code></td><td>fp16 SD3 only</td></tr>
+<tr><td><code>cost/elapsed_gpu_hours</code>, <code>cost/training_gpu_hours</code></td><td>the x-axis for efficiency claims</td></tr>
+</tbody></table></div>
+<div class="callout warn"><p class="callout-title">Pitfall: drift and mask fraction are not logged</p><p><code>art_loss</code> returns <code>masked</code>, <code>keep_mask</code>, <code>movement_score</code> (the drift energy $m(s_t)$) and <code>outward_alignment</code>, and the paper's mask-diagnostics figure plots the velocity drift before second updates. The released runners do not write any of them to <code>metrics.jsonl</code>; <code>ARTObjective.__call__</code> returns only <code>per_item_loss</code>. If you want those curves, add them yourself (Exercise 5.4 does this in a few lines).</p></div>
+
+<h3 id="s5-debug">A debugging plan for one iteration</h3>
+<p>The fixture is small enough to step through in a debugger in a few minutes, and it exercises every production function on the ART path. Run it under <code>pdb</code> from the repo root, with a fresh output directory:</p>
+<figure class="code">
+  <figcaption><span class="tag">shell</span> start the smoke run under pdb</figcaption>
+  <pre><code class="language-bash">uv run --locked python -m pdb -m visual_rl.train \
+  --config configs/examples/cpu_smoke.yaml --output-dir outputs/cpu-debug</code></pre>
+</figure>
+<ol>
+  <li><code>b src/visual_rl/train.py:159</code>, the hand-off <code>backend.load()(config, **options)</code>. Inspect <code>config.to_dict()</code> and <code>backend.status</code>.</li>
+  <li><code>b src/visual_rl/backends/tensor_fixture.py:182</code>, just before <code>collect_rollout</code>. Check <code>noise.shape == (8, 4)</code>, <code>sigmas</code>, <code>kwargs["selected"] == (0, 1, 2)</code>.</li>
+  <li><code>b src/visual_rl/training/rollout.py:140</code>, inside the step loop where a selected state is stored. Step through one store and confirm that <code>states[rows_at_step, slots_at_step]</code> receives the <em>input</em> state of the step and <code>velocities</code> the prediction made at that state.</li>
+  <li><code>b src/visual_rl/algorithms/covariance.py:102</code>. Print <code>means</code>, <code>mad</code>, <code>rms</code>, <code>signal_rms</code>, <code>active</code>. Verify by hand that <code>covariance[g] / rms[g]</code> equals <code>directions[g]</code>.</li>
+  <li><code>b src/visual_rl/training/objectives.py:131</code>, before <code>art_loss</code>. Print <code>rows</code>, <code>slots</code>, <code>steps</code>, <code>dt</code> (negative), and <code>(velocity - old).abs().max()</code>: zero during window 1, nonzero during window 2.</li>
+  <li><code>b src/visual_rl/algorithms/art.py:134</code>. During window 2, print <code>energy</code>, <code>alignment</code>, <code>threshold</code> and see which items are masked.</li>
+  <li><code>b src/visual_rl/training/update.py:217</code>, before clipping. Print <code>loss_sum / total.item()</code> and compare with the <code>train/loss</code> line that will be logged; check <code>counts</code> (4 microbatches of 3 items).</li>
+  <li><code>b src/visual_rl/backends/tensor_fixture.py:270</code>. After two windows, <code>progress.completed_rollouts</code> increments; continue to the checkpoint at step 2.</li>
+</ol>
+<p>The printed trace earlier in this chapter is the expected state at breakpoints 2, 4, 5 and 6. For real-model runs, the same checkpoints exist in <code>backends/sd3.py</code> (<code>collect_rollout</code> at L780, <code>_art_update</code> at L824) and <code>backends/hunyuan.py</code> (<code>collect_training</code>, <code>prepare_objective</code>). One cheap real-run assertion is worth adding: on update 1, <code>(velocity - old).abs().max()</code> should be at numerical-noise level. If it is not, the training forward does not reproduce the rollout forward (different autocast dtype, train-mode dropout, a different attention kernel), and every "drift" the mask sees is an artifact.</p>
+
+<h3 id="s5-experiments">Experiments to build intuition</h3>
+<p>The fixture cannot change algorithm options (its validator rejects them), so I drove the repo's kernels directly with the fixture's MLP and reward: $P=4$, $K=4$, 6 steps, lr $3\times10^{-3}$, 40 rollouts, 5 seeds, evaluated on fixed noise. These numbers are a toy; they show mechanics, not the paper's results.</p>
+<figure class="code">
+  <figcaption><span class="tag">real output · tutorial/scratch/step5/toy_experiments.py</span> final eval reward (mean ± std over 5 seeds); mask fraction and drift measured on second updates</figcaption>
+  <pre><code class="language-text">toy: steps=6 lr=0.003 rollouts=40, 5 seeds; higher reward is better (0 is perfect)
+no training (rollouts=0)                     eval reward -1.5397 ± 0.1063
+ART  P4 K4, two updates, mask on (default)   eval reward -0.8993 ± 0.0568  mask frac (upd 2) 0.317  drift m(s) 1.90e-05
+ART  P4 K4, ONE update per rollout           eval reward -1.0319 ± 0.0684
+ART  P4 K4, two updates, mask OFF            eval reward -0.8785 ± 0.0779  mask frac (upd 2) 0.000  drift m(s) 2.05e-05
+ART  P4 K2                                   eval reward -0.9960 ± 0.0724  mask frac (upd 2) 0.206  drift m(s) 1.47e-05
+ART  P4 K8                                   eval reward -0.7084 ± 0.0661  mask frac (upd 2) 0.371  drift m(s) 2.15e-05
+ART  P8 K2 (same 16 samples, more prompts)   eval reward -0.8581 ± 0.0623  mask frac (upd 2) 0.291  drift m(s) 1.88e-05
+ART-Pairwise P4 K4                           eval reward -1.0185 ± 0.0692  mask frac (upd 2) 0.266  drift m(s) 1.67e-05
+ART-Pairwise P4 K2                           eval reward -0.9960 ± 0.0724  mask frac (upd 2) 0.206  drift m(s) 1.47e-05
+ART  normalized_aggregate direction          eval reward -0.8993 ± 0.0568  mask frac (upd 2) 0.317  drift m(s) 1.90e-05
+ART  raw_covariance scale (no unit norm)     eval reward -0.9684 ± 0.0602  mask frac (upd 2) 0.274  drift m(s) 1.58e-05</code></pre>
+</figure>
+<p>Below, each experiment lists the change for real runs, what the paper reports, and what the toy shows.</p>
+<ol>
+  <li><strong>Turn off the second update.</strong> Image: add <code>algorithm.options.updates_per_rollout: 1</code>; the paper ships <code>configs/paper/image/sd3_ocr_art_one_update.yaml</code>. Paper (§5.1, T2I ablation figure): "ART: 1 update" learns quickly but gradually deteriorates, while the second update adds restoration and long-term stability. So expect similar early curves and a late decline without the second update; read <code>train/reward</code> over the full 1000 updates and <code>train/grad_norm/before_clip</code>. Toy: $-1.03$ vs $-0.90$ after 40 rollouts, but this short horizon cannot show the late deterioration, and one update per rollout also means half the optimizer steps for the same rollouts. Compare at equal rollouts <em>and</em> at equal optimizer steps.</li>
+  <li><strong>Vary $K \in \{2,4,8\}$.</strong> Video: <code>hunyuan_pairwise_vq_k{2,4,8}.yaml</code> (pairwise) and <code>hunyuan_scalar_vq_k8.yaml</code>. Paper: pairwise $K=2$ reaches final VQ 12.235 versus 12.092 for $K=8$ with 3.4× fewer GPU-hours. Toy: $K=8$ is best per rollout, but it also uses twice the samples of $K=4$. The fair toy comparison is P4K4 versus P8K2 at 16 samples each: $-0.90$ vs $-0.86$, i.e. more prompts with smaller groups is at least as good, matching the README's advice on prompt diversity.</li>
+  <li><strong>Scalar vs pairwise.</strong> Video: add <code>pairwise: {seed: 42}</code> (requires VQ-only fixed-normalized reward). Paper: pairwise is close to scalar under the scalar evaluation metric. Toy: at $K=2$ pairwise and scalar are <em>bit-identical</em> ($-0.9960$ both), because with two samples the centered label vector $(\pm\tfrac12)$ has the same sign pattern as the centered rewards, and normalization removes the magnitude (Exercise 5.5). At $K=4$ pairwise discards within-pair magnitude and cross-pair information and is slightly worse.</li>
+  <li><strong>ART vs NFT on-policy without EMA.</strong> Image: <code>sd3_pickscore_art.yaml</code> vs <code>sd3_pickscore_nft_onpolicy.yaml</code> (same $P$, $K$, steps, lr). Paper (§3 and T2I results): DiffusionNFT (on-policy) collapses on SD3.5-M while ART does not, because the self-consistency force is no longer restrained by an EMA. Read <code>train/reward</code> and <code>train/grad_norm/before_clip</code> together; a collapse shows as a reward drop after an early rise. Not run here.</li>
+  <li><strong>Change the guidance normalization.</strong> Set <code>covariance.scale_mode: raw_covariance</code> (step size proportional to the raw covariance RMS) or <code>direction_mode: normalized_aggregate</code>. Paper: RMS normalization "fixes the guidance magnitude across prompts and reward models". Toy: <code>normalized_aggregate</code> is identical to the default (the MAD cancels), and <code>raw_covariance</code> is slower ($-0.97$ vs $-0.90$) because low-spread prompts get tiny targets. With a real reward on a different scale (PickScore raw logits around 20 vs fixed-normalized around 0.8) the raw mode would also change the effective learning rate, which is exactly what unit normalization prevents.</li>
+  <li><strong>Turn off the trust-region mask.</strong> <code>loss.corrective_mask_enabled: false</code>. Paper (Appendix on masking): on images the no-mask run is as good or slightly faster; on HunyuanVideo it shows larger late-stage gradient and drift spikes (max first-update grad norm 3.33 vs 1.96). Toy: slightly better without the mask ($-0.88$ vs $-0.90$), with mean drift $2.05\times10^{-5}$ vs $1.90\times10^{-5}$, consistent with the image finding. Watch <code>train/grad_norm/before_clip</code> on odd steps when you try this on video.</li>
+</ol>
+
+<h3 id="s5-porting">Porting notes for an LLM RL framework</h3>
+<p>If you maintain a Megatron + SGLang style stack, this is what a diffusion integration needs, in order of surprise.</p>
+<ul>
+  <li><strong>Rollout engine.</strong> Generation is a fixed-length loop of $T$ full-sequence transformer calls on a latent tensor, with no KV cache and no sampling. The engine must return, per sample, the selected intermediate states and predicted velocities, not just the final output. Batching is trivial (all samples have the same shape); CFG, if used, doubles the batch.</li>
+  <li><strong>Data plane.</strong> You ship latents, not token ids: about 1.4 GiB of fp32 cache per SD3 rank, 0.9 GiB per Hunyuan rank (worked out above). If the rollout engine and trainer are disaggregated, plan for tensor transport (NCCL or RDMA, pinned buffers), not JSON. Only <code>states</code> and <code>old_velocities</code> are needed for ART, so you can halve the repo's footprint; bf16 storage halves it again at some fidelity risk.</li>
+  <li><strong>No logprobs, but you still need parity.</strong> ART needs no transition likelihood, so the classic rollout/training logprob mismatch disappears. It is replaced by a velocity mismatch: if the engine's $v^{(0)}$ differs from the trainer's forward at $\theta_{\text{old}}$, update 1 already sees a spurious drift $d\neq0$, which biases the target and can trip the mask. Either make the forwards bitwise aligned, or recompute $v^{(0)}$ in the trainer (one extra no-grad forward per item, which is what ART was designed to avoid).</li>
+  <li><strong>Reward services.</strong> Rewards need a VAE decode, then a scorer (PickScore, a VLM-based VideoReward, OCR or detector workers). These look like generative reward models in LLM RL: GPU-heavy, best run as separate services with their own batching. The repo encodes videos to MP4 before scoring, so the codec is part of the reward.</li>
+  <li><strong>Group placement.</strong> Guidance needs all $K$ endpoints of a prompt in one place. The repo keeps each prompt's group on one data-parallel rank and computes $G(c)$ locally; this is cheaper than gathering endpoint tensors across ranks, and it is the analogue of computing GRPO group advantages, except the statistic is a $D$-dimensional vector.</li>
+  <li><strong>Loss and steps.</strong> Per-item MSE with a fixed denominator, two optimizer steps per rollout over disjoint trajectory halves, global grad clip. In a Megatron trainer this is a custom loss function plus "two minibatches per rollout"; data and pipeline parallelism need nothing special. The covariance and target can be precomputed on the rollout side and shipped as a per-sample target, so the trainer only sees (state, $t$, condition, target, weight).</li>
+  <li><strong>Old-policy shadows.</strong> ART needs no old-policy weights at all. NFT baselines do: <code>training/fsdp_shadow.py</code> keeps a CPU copy of each rank's FSDP local shards and swaps them in for old-policy forwards, without ever materializing a second full model on GPU. The Megatron equivalent is a CPU copy of the local TP/PP shards.</li>
+  <li><strong>Weight sync.</strong> After both updates, push weights to the rollout engine as usual; with LoRA (image recipes) only the adapters change.</li>
+</ul>
+
+<h3 id="s5-pitfalls">Pitfalls collected</h3>
+<div class="callout warn"><p class="callout-title">Pitfall: computing guidance on a microbatch</p><p>The covariance must use the complete group of $K$ endpoints. <code>art_scalar_covariance</code>'s docstring says "Complete-group covariance, never a microbatch estimator", and the distributed runners keep groups rank-local. If you shard a group across ranks or compute $G$ per update window, you get a noisier and differently normalized direction, and the two windows no longer share one frozen target.</p></div>
+<div class="callout warn"><p class="callout-title">Pitfall: examples are not recipes</p><p><code>configs/examples/*.yaml</code> are four-update integration checks with deliberately small $P$, $K$ and sometimes different sampling (CFG 7 in the SD3 example, microbatch 1 in Hunyuan). Comparisons belong in <code>configs/paper/</code>, and even those are labeled as candidates, not certified reproductions (see each file's <code>provenance</code> block).</p></div>
+<div class="callout warn"><p class="callout-title">Pitfall: world size and P</p><p><code>sampling.prompts_per_rollout</code> is global and must be divisible by the number of workers (<code>train.py</code> L114–117). Doubling GPUs with the same $P$ halves the per-rank groups, which changes how the two windows are composed in prompt-major backends but not the guidance itself.</p></div>
+
+<h3 id="s5-exercises">Exercises</h3>
+<details class="exercise"><summary>Exercise 5.1 — Find every place where $K$ enters the guidance computation. Does the magnitude of $G(c)$ depend on $K$?</summary><div class="solution">
+<p>In <code>art_scalar_covariance</code>, $K$ is <code>counts</code> (L66). It enters at three places: the group means (L69, L70), the MAD (L80, divided by <code>counts</code>) and the covariance denominator (L82, <code>counts - 1</code> for the unbiased reduction). The direction is <code>signal / signal_rms</code> (L103) with <code>signal = covariance / mad</code>: any positive scalar that multiplies the covariance or the MAD cancels in this ratio, so both $1/(K-1)$ and the $1/K$ inside MAD disappear. The magnitude is the constant 1 for <code>unit_normalized_covariance</code> (L90), and <code>art_loss</code> normalizes again. So $\operatorname{rms}(G(c))=1$ for every $K\ge2$ whenever the group is active; $K$ affects only the estimator's noise (which direction you get). Outside the kernel, $K$ also enters <code>disjoint_windows</code> (rows $=PK$ must split evenly), the loss denominator (items per window $= PK S/2$) and, for pairwise, the pair partition (<code>group_size</code>, which must be 2, 4 or 8). With <code>scale_mode: raw_covariance</code>, the magnitude becomes <code>rms</code>, which does depend on $K$ through $1/(K-1)$.</p>
+</div></details>
+<details class="exercise"><summary>Exercise 5.2 — Modify the CPU smoke config to run Flow-GRPO-Fast. Why is the second update's gradient almost zero?</summary><div class="solution">
+<p>Create a child config next to the example (paths in <code>extends</code> are relative to the child file) and run it:</p>
+<pre><code class="language-yaml">extends: cpu_smoke.yaml
+name: cpu-smoke-fast
+algorithm: flow_grpo_fast
+runtime:
+  output_dir: outputs/cpu-smoke-fast</code></pre>
+<pre><code class="language-bash">uv run --locked visual-rl --config configs/examples/cpu_smoke_fast.yaml</code></pre>
+<p>Because the algorithm name differs from the parent's, the whole <code>algorithm</code> section is replaced (no ART options leak in). The fixture then samples with one Flow-SDE step at index 0 and ODE elsewhere (<code>tensor_fixture.py</code> L163–165), computes advantages with <code>group_advantages(mode="global_population_std", eps=1e-4)</code>, and uses <code>clipped_grpo_loss</code> with <code>ratio_clip=1e-5</code> (L196–211). The real run above logged gradient norms 0.309, 0.0, 0.226, 0.0023. At update 1 all ratios are exactly 1 and the gradient is $-\nabla\tfrac1N\sum A_i\rho_i$. After one AdamW step, almost every ratio has moved by more than $10^{-5}$. The PPO surrogate $\max(-A\rho, -A\operatorname{clip}(\rho))$ has zero gradient whenever $\rho$ moved past the clip boundary in the advantage's favorable direction, which is what the first update just did. So the second window is almost entirely clipped. This is the LLM-RL intuition carried over unchanged, and it shows how conservative $10^{-5}$ is; the paper's credit-assignment argument is that this clipped, per-transition signal is a slow way to move a continuous policy.</p>
+</div></details>
+<details class="exercise"><summary>Exercise 5.3 — All $K$ rewards of every prompt are equal. Trace what happens to guidance, loss and the optimizer in an image run and in a video run.</summary><div class="solution">
+<p><strong>Kernel.</strong> Runners pass <code>zero_signal_mode="exact"</code>. In <code>art_scalar_covariance</code>, <code>maxima == minima</code> marks the group constant (L73–75), so <code>centered</code> is forced to exactly 0 (L77). Then <code>mad</code> is 0 and <code>covariance</code> is 0, so <code>active</code> is false (L94), <code>magnitudes</code> become 0 (L96) and <code>directions</code> become 0 (L108). Without exact mode, the fp32 mean of identical values could differ from them by one ulp, giving a nonzero <code>centered</code> whose normalized direction would be pure rounding noise; exact mode exists to prevent that.</p>
+<p><strong>Loss.</strong> In <code>art_loss</code>, <code>active</code> is false for every item (L127). Unless an item is a restore anchor, <code>keep</code> is false and its <code>per_item_loss</code> is 0 (L135–136), while it still counts in the denominator.</p>
+<p><strong>Image runner.</strong> Image recipes use <code>restore_zero_signal: false</code>, so no anchors. <code>ARTObjective.has_guidance</code> is false; <code>sd3.py</code> (L837–845) logs <code>system/skipped_zero_guidance: 1</code> with the rewards, does not step the optimizer, does not advance <code>train/optimizer_step</code>, and samples a new rollout. Under DDP the flag is MAX-reduced, so a rank with no signal still runs both windows when another rank has signal (<code>image_ddp.py</code> L357–358). <code>NoSignalGuard</code> warns at exponentially spaced counts and, if <code>runtime.max_consecutive_no_signal_rollouts</code> is set (default: unset, no limit), stops training after that many consecutive skips.</p>
+<p><strong>Video runner.</strong> Hunyuan recipes use <code>restore_zero_signal: true</code>, so the inactive rows become anchors (<code>hunyuan.py</code> L242). For an anchor the displacement is 0, so the target is the old velocity and the loss is $t\,\operatorname{MSE}(v_\theta, v^{(0)})$. On update 1 this is 0 with zero gradient; on update 2 it pulls the drift caused by update 1 back toward $v^{(0)}$: pure restoration, no guidance. The windows are executed (anchor-only rollouts are not skipped).</p>
+<p><strong>Mixed case.</strong> If only some prompts are constant, the active prompts train normally and the constant ones contribute zeros that still dilute the mean, so <code>train/loss</code> on update 1 equals mean $t$ times the active fraction. That is a way to read the fraction of saturated prompts off the loss curve.</p>
+</div></details>
+<details class="exercise"><summary>Exercise 5.4 — Add <code>train/art/masked_fraction</code> and a drift metric to <code>metrics.jsonl</code>.</summary><div class="solution">
+<p><code>art_loss</code> already computes the values; <code>ARTObjective.__call__</code> discards them. Keep a list on the objective and reduce it after each window. The smallest change to <code>training/objectives.py</code>:</p>
+<pre><code class="language-python">@dataclass
+class ARTObjective:
+    ...
+    reconstruct_old_from_mean: bool = False
+    diagnostics: list = field(default_factory=list)          # new
+
+    def __call__(self, items):
+        ...
+        terms = art_loss(...)                                # unchanged
+        self.diagnostics.append({k: terms[k].detach().cpu()  # new
+                                 for k in ("masked", "movement_score")})
+        return terms["per_item_loss"]
+
+    def pop_metrics(self):                                   # new
+        masked = torch.cat([d["masked"] for d in self.diagnostics]).float()
+        score = torch.cat([d["movement_score"] for d in self.diagnostics])
+        self.diagnostics.clear()
+        return {"train/art/masked_fraction": masked.mean().item(),
+                "train/art/movement_score_mean": score.mean().item()}</code></pre>
+<p>Then in the runner, after each <code>accumulated_step</code> for ART, call <code>metrics.update(objective.pop_metrics())</code> before writing the line. Under DDP or FSDP, all-reduce the sums and counts before dividing, otherwise each rank logs its local fraction and only rank 0's is exported. I tested the same logic as a subclass outside the repo on the smoke iteration:</p>
+<pre><code class="language-text">{'train/loss': 0.75, 'train/grad_norm/before_clip': 1.1816498, 'train/grad_clip_triggered': 1.0, 'train/art/masked_fraction': 0.0, 'train/art/movement_score_mean': 0.0}
+{'train/loss': 0.70810898, 'train/grad_norm/before_clip': 1.35770071, 'train/grad_clip_triggered': 1.0, 'train/art/masked_fraction': 0.08333334, 'train/art/movement_score_mean': 3.52e-06}</code></pre>
+<p>As expected, update 1 shows zero drift and no mask; update 2 shows mean drift energy $3.5\times10^{-6}$ (below $\delta$ on average) with 1 of 12 items masked. The paper's "velocity drift before second updates" curve is the update-2 value of this metric.</p>
+</div></details>
+<details class="exercise"><summary>Exercise 5.5 — Show that DiffusionART-Pairwise with $K=2$ produces exactly the scalar guidance (when the pair is not tied), and explain the toy result where both gave $-0.9960$.</summary><div class="solution">
+<p>For one prompt with endpoints $x^{(1)}, x^{(2)}$ and rewards $R_1 &gt; R_2$, the scalar covariance with the code's unbiased reduction is $\tfrac{1}{1}\bigl[(R_1-\bar R)x^{(1)} + (R_2-\bar R)x^{(2)}\bigr] = \tfrac{R_1-R_2}{2}(x^{(1)}-x^{(2)})$. Pairwise labels are $y_1=1, y_2=0$, giving $\tfrac12(x^{(1)}-x^{(2)})$. Both are positive multiples of $x^{(1)}-x^{(2)}$, so after RMS normalization they are identical: the winner-minus-loser direction, as the paper's appendix states. With $K=2$ there is exactly one pair, so <code>preference</code> is true for both rows whenever $R_1\ne R_2$, and <code>row_guidance_magnitudes</code> equals the scalar magnitude 1. The only differences are a tie (scalar: exact zero signal; pairwise: anchors if some other prompt has a preference) and the pair-seeding RNG, which consumes no global RNG state. Hence the two toy runs performed the same arithmetic on the same random stream and printed the same $-0.9960 \pm 0.0724$. For $K\ge4$ the two differ: pairwise uses only within-pair order, so a sample that wins its pair narrowly counts as much as one that wins by a lot, and cross-pair differences are ignored.</p>
+</div></details>
+
+<div class="takeaways"><p class="callout-title">Takeaways</p><ul>
+  <li>The algorithm lives in three pure kernels: <code>art_scalar_covariance</code>/<code>art_pairwise_covariance</code> ($G(c)$), <code>art_loss</code> (target, $t$-weighting, mask) and <code>disjoint_windows</code> + <code>accumulated_step</code> (two optimizer steps with a fixed denominator). Backends choose the model; <code>algorithm.name</code> chooses the branch.</li>
+  <li>The code's velocity is $\tilde v = \epsilon - x_0 = -v$ and <code>dt</code> is negative. With that substitution, <code>target = old - G</code> is the paper's $v^{(0)}+G$, and the mask's energy and alignment are exactly $m(s_t)$ and $\langle d, G-d\rangle$.</li>
+  <li>The code adds an unbiased $K-1$ denominator, a MAD pre-division with a $10^{-5}$ floor, a second RMS normalization, exact zero-signal gating, restore anchors for video and tied pairs, grad clip 1.0, and fp32 statistics. None of these change the paper's math in the normal regime.</li>
+  <li>Update 1's loss equals the mean trained $t$ times the active fraction; this is a free health check. The mask can only fire on update 2.</li>
+  <li>The rollout cache (states and old velocities, fp32, on CPU) is the price of skipping NFT's extra old-policy forward: about 1.4 GiB per SD3 rank, 0.9 GiB per Hunyuan rank.</li>
+  <li>Microbatch sizes are memory knobs; the window count is an algorithm knob. Drift and mask fraction are not logged by default.</li>
+</ul></div>
+
+<div class="reading"><p class="callout-title">Further reading</p><ul>
+  <li>The paper, §4 and Appendix (reference transitions, pairwise identity): <a href="https://arxiv.org/abs/2610.12572">arXiv:2610.12572</a>.</li>
+  <li>The repository and its kernel specification, <code>docs/algorithm-provenance.md</code>: <a href="https://github.com/vanzll/DiffusionART">github.com/vanzll/DiffusionART</a>.</li>
+  <li><code>docs/distributed-execution.md</code>, <code>docs/hunyuan-runner.md</code> and <code>docs/paper-video.md</code> in the repo for the DDP/FSDP contracts and the full video settings.</li>
+  <li>Flow-GRPO, whose ODE-to-SDE construction defines the reference transition used by the mask: <a href="https://github.com/yifan123/flow_grpo">github.com/yifan123/flow_grpo</a>.</li>
+  <li>DiffusionNFT, the forward-process baseline: <a href="https://github.com/NVlabs/DiffusionNFT">github.com/NVlabs/DiffusionNFT</a>. DanceGRPO: <a href="https://github.com/XueZeyue/DanceGRPO">github.com/XueZeyue/DanceGRPO</a>.</li>
+</ul></div>
+</section>
+<nav class="pager"><a class="prev" href="step-4.html">← Step 4: The DiffusionART paper</a><a class="next" href="index.html#closing">Putting it together →</a></nav></main></div>
+<script>
+(() => {
+  try { if (window.hljs) document.querySelectorAll('pre code').forEach(el => window.hljs.highlightElement(el)); } catch (e) {}
+  // Copy buttons on code blocks.
+  document.querySelectorAll('figure.code pre:first-of-type').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'copy'; btn.textContent = 'Copy';
+    btn.addEventListener('click', () => {
+      const text = pre.innerText;
+      const done = () => { btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy', 1400); };
+      const fallback = () => { const r = document.createRange(); r.selectNodeContents(pre);
+        const s = getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = 'Selected'; };
+      try { navigator.clipboard.writeText(text).then(done, fallback); } catch (e) { fallback(); }
+    });
+    const wrap = document.createElement('div');
+    wrap.className = 'pre-wrap';
+    pre.parentElement.insertBefore(wrap, pre);
+    wrap.appendChild(pre); wrap.appendChild(btn);
+  });
+  // Highlight the current section in the sidebar.
+  const links = [...document.querySelectorAll('.toc a[href^="#"]')];
+  const map = new Map(links.map(a => [a.getAttribute('href').slice(1), a]));
+  const targets = [...map.keys()].map(id => document.getElementById(id)).filter(Boolean);
+  if ('IntersectionObserver' in window && targets.length) {
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          links.forEach(a => a.classList.remove('active'));
+          const a = map.get(e.target.id); if (a) a.classList.add('active');
+        }
+      });
+    }, { rootMargin: '0px 0px -75% 0px' });
+    targets.forEach(t => io.observe(t));
+  }
+})();
+</script>
+</body>
+</html>
